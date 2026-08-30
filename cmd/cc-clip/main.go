@@ -59,6 +59,8 @@ func main() {
 		cmdService()
 	case "hosts":
 		cmdHosts()
+	case "tunnel":
+		cmdTunnel()
 	case "update":
 		cmdUpdate()
 	case "notify":
@@ -133,6 +135,16 @@ Deployment targets (connect/setup; choose at most one selector):
                      Remove Codex support from a remote host (bridge, Xvfb,
                      notify entry, DISPLAY marker)
   uninstall --codex  Remove Codex support on this machine
+
+Managed tunnel (experimental, Phase 1A — manual only):
+  tunnel run <host>  Run the managed tunnel supervisor for <host> in the
+                     foreground. Starts a private non-interactive ssh master
+                     holding one reverse forward, probes daemon health through
+                     it, reconnects with backoff; stops cleanly on Ctrl-C.
+                     No LaunchAgent, no ~/.ssh/config changes, nothing enabled
+                     automatically. The legacy RemoteForward workflow is
+                     unchanged and remains the default.
+    --port           Tunnel port (default: 18339, env: CC_CLIP_PORT)
 
 Local daemon and diagnostics (run on your local machine):
   serve              Run the clipboard daemon in the foreground
