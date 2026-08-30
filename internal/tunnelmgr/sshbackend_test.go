@@ -10,26 +10,24 @@ import (
 )
 
 // TestMasterArgs pins the exact ssh invocation of the managed master. The
-// option set is the safety boundary: BatchMode keeps a background supervisor
-// off interactive prompts, ClearAllForwardings drops the user's own config
-// forwards before exactly one managed reverse forward is added, and the
-// ControlMaster socket is a path we generated — never a user master.
+// option set is the safety boundary: the master inherits connection settings
+// from the named Host but starts with no forwarding at all.
 func TestMasterArgs(t *testing.T) {
-	b := &Backend{Spec: Spec{Host: "example-host", Port: 18339}}
+	b := &Backend{Spec: Spec{Host: "example-host", Port: 18339, ExpectedInstanceID: "instance-123"}}
 	args := b.MasterArgs("/ctl/dir/ctl-ab12.sock")
 
 	joined := strings.Join(args, "\x00")
 	for _, want := range []string{
-		"-N", "-T",
+		"-M", "-N", "-T", "-S", "/ctl/dir/ctl-ab12.sock",
 		"BatchMode=yes",
 		"ClearAllForwardings=yes",
 		"ExitOnForwardFailure=yes",
 		"ControlMaster=yes",
-		"ControlPath=/ctl/dir/ctl-ab12.sock",
+		"ControlPersist=no",
+		"ForwardAgent=no",
+		"ForwardX11=no",
 		"ServerAliveInterval=15",
 		"ServerAliveCountMax=3",
-		"-R",
-		"127.0.0.1:18339:127.0.0.1:18339",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("master argv missing %q; got %q", want, args)
@@ -38,19 +36,32 @@ func TestMasterArgs(t *testing.T) {
 	if args[len(args)-1] != "example-host" {
 		t.Errorf("host must be the final argument, got %q", args[len(args)-1])
 	}
-	// Exactly one reverse forward may be requested.
-	if got := strings.Count(joined, "-R\x00"); got != 1 {
-		t.Errorf("master argv requests %d reverse forwards, want 1", got)
+	if strings.Contains(joined, "-R") {
+		t.Errorf("master argv must be forwarding-free: %q", args)
+	}
+	if args[len(args)-2] != "--" {
+		t.Errorf("host must follow option terminator: %q", args)
+	}
+}
+
+func TestForwardControlArgsAddsOnlyManagedReverseForward(t *testing.T) {
+	b := &Backend{Spec: Spec{Host: "example-host", Port: 18339, ExpectedInstanceID: "instance-123"}}
+	args := b.controlArgs("/ctl/empty", "/ctl/socket", "forward", "-R", "127.0.0.1:18339:127.0.0.1:18339")
+	joined := strings.Join(args, "\x00")
+	for _, want := range []string{"-F\x00/ctl/empty", "-S\x00/ctl/socket", "-O\x00forward", "-R\x00127.0.0.1:18339:127.0.0.1:18339", "--\x00example-host"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("forward control argv missing %q: %q", want, args)
+		}
 	}
 }
 
 func TestProbeArgs(t *testing.T) {
-	b := &Backend{Spec: Spec{Host: "example-host", Port: 18339}}
+	b := &Backend{Spec: Spec{Host: "example-host", Port: 18339, ExpectedInstanceID: "instance-123"}}
 	cmd := "remote probe script"
-	args := b.probeArgs("/ctl/dir/ctl-ab12.sock", cmd)
+	args := b.probeArgs("/ctl/dir/empty-config", "/ctl/dir/ctl-ab12.sock", cmd)
 
 	joined := strings.Join(args, "\x00")
-	for _, want := range []string{"BatchMode=yes", "ClearAllForwardings=yes", "ControlPath=/ctl/dir/ctl-ab12.sock"} {
+	for _, want := range []string{"BatchMode=yes", "ClearAllForwardings=yes", "/ctl/dir/empty-config", "/ctl/dir/ctl-ab12.sock"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("probe argv missing %q; got %q", want, args)
 		}
@@ -86,5 +97,23 @@ func TestNewControlSocketPathUniqueAndInsideDir(t *testing.T) {
 	// Reserve leaves no file behind: ssh creates the socket itself.
 	if _, err := os.Stat(first); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("reserved path must not exist, stat err = %v", err)
+	}
+}
+
+func TestNewEmptyControlConfigIsPrivateAndEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty-ssh-config")
+	got, err := newEmptyControlConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != path {
+		t.Fatalf("config path = %q, want %q", got, path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 || info.Mode().Perm() != stateFileMode {
+		t.Fatalf("empty config size/mode = %d/%o, want 0/%o", info.Size(), info.Mode().Perm(), stateFileMode)
 	}
 }

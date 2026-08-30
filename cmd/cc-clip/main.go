@@ -136,7 +136,7 @@ Deployment targets (connect/setup; choose at most one selector):
                      notify entry, DISPLAY marker)
   uninstall --codex  Remove Codex support on this machine
 
-Managed tunnel (experimental, Phase 1A — manual only):
+Managed tunnel (experimental, manual only):
   tunnel run <host>  Run the managed tunnel supervisor for <host> in the
                      foreground. Starts a private non-interactive ssh master
                      holding one reverse forward, probes daemon health through
@@ -145,6 +145,7 @@ Managed tunnel (experimental, Phase 1A — manual only):
                      automatically. The legacy RemoteForward workflow is
                      unchanged and remains the default.
     --port           Tunnel port (default: 18339, env: CC_CLIP_PORT)
+    --reset          Reset persisted runtime and clear crash-loop state
 
 Local daemon and diagnostics (run on your local machine):
   serve              Run the clipboard daemon in the foreground

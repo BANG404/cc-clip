@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,105 +17,85 @@ import (
 	"github.com/shunmei/cc-clip/internal/tunnel"
 )
 
-// defaultControlDirName is the directory, under the user's home, that holds
-// the managed tunnel's private ControlMaster sockets. The parent directory
-// is created with mode 0700, so only the current user can reach the socket.
-const defaultControlDirName = ".cache/cc-clip/tunnels"
+const defaultControlDirName = ".cache/cc-clip/tunnel-runtime/control"
 
-// ExitInfo describes how the managed ssh child ended.
+var ErrPortConflict = errors.New("remote forward port conflict")
+
 type ExitInfo struct {
-	// Code is the child's exit status, or -1 if it could not be determined
-	// (e.g. killed by a signal).
-	Code int
-
-	// StderrTail is the last chunk of the child's stderr, the raw material
-	// for exit classification. It may name the SSH target.
+	Code       int
 	StderrTail string
-
-	// Uptime is how long the child ran before exiting. The supervisor uses
-	// it to reset the restart backoff once a connection proved stable.
-	Uptime time.Duration
+	Uptime     time.Duration
 }
 
-// Backend owns the managed tunnel's ssh child: it starts a private
-// non-interactive ControlMaster with exactly one reverse forward, probes
-// remote daemon health through that master's own control socket, and stops
-// the child it started.
-//
-// Process-ownership boundary: the backend only ever signals the os.Process
-// it spawned itself. It never looks up, matches, or kills ssh processes by
-// name, PID file, or broad pattern, and it only ever speaks to the control
-// socket path it generated — a user's own SSH master is never touched.
+// Backend owns exactly one directly spawned SSH master. Forwarding is added
+// only after the master is reachable through its private control socket.
 type Backend struct {
-	// Spec is the tunnel to run.
-	Spec Spec
-
-	// SSHBinary is the ssh executable. Empty means "ssh" from PATH.
-	SSHBinary string
-
-	// ControlDir overrides the directory for the control socket. Empty means
-	// ~/.cache/cc-clip/tunnels. Tests point it at a temp directory.
+	Spec       Spec
+	SSHBinary  string
 	ControlDir string
 
-	mu          sync.Mutex
-	cmd         *exec.Cmd
-	controlPath string
-	running     bool
-	startedAt   time.Time
-	exit        *ExitInfo
-	done        chan struct{}
+	mu            sync.Mutex
+	cmd           *exec.Cmd
+	controlPath   string
+	controlConfig string
+	running       bool
+	forwarded     bool
+	exit          *ExitInfo
+	done          chan struct{}
 }
 
-// Start spawns the managed ssh master. The child stays in the foreground
-// (ssh -N) until it exits or is stopped; completion is reported through
-// Running/LastExit.
-//
-// The child is intentionally NOT bound to a context: context cancellation
-// kills via SIGKILL, which would strand the remote forward (the stale-sshd
-// problem this supervisor exists to avoid). Shutdown goes through Stop,
-// which terminates gracefully first.
+// Start spawns a forwarding-free private master. WaitReady and Forward perform
+// the two remaining bootstrap steps explicitly.
 func (b *Backend) Start() error {
 	b.mu.Lock()
 	if b.running {
 		b.mu.Unlock()
 		return fmt.Errorf("managed ssh child already running")
 	}
-	dir := b.controlDir()
-	if err := os.MkdirAll(dir, stateDirMode); err != nil {
+	dir, err := b.controlDir()
+	if err != nil {
 		b.mu.Unlock()
-		return fmt.Errorf("create control socket dir: %w", err)
+		return err
+	}
+	if err := ensurePrivateDir(dir); err != nil {
+		b.mu.Unlock()
+		return err
 	}
 	controlPath, err := newControlSocketPath(dir)
 	if err != nil {
 		b.mu.Unlock()
 		return err
 	}
-	args := b.MasterArgs(controlPath)
-	cmd := exec.Command(b.sshBinary(), args...)
+	controlConfig, err := newEmptyControlConfig(controlPath + ".config")
+	if err != nil {
+		b.mu.Unlock()
+		return err
+	}
+	cmd := exec.Command(b.sshBinary(), b.MasterArgs(controlPath)...)
 	buf := &tailBuffer{max: 4096}
 	cmd.Stdout = buf
 	cmd.Stderr = buf
 	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
+		_ = os.Remove(controlConfig)
 		b.mu.Unlock()
 		return fmt.Errorf("start ssh master: %w", err)
 	}
 	b.cmd = cmd
 	b.controlPath = controlPath
+	b.controlConfig = controlConfig
 	b.running = true
-	b.startedAt = startedAt
+	b.forwarded = false
 	b.exit = nil
 	done := make(chan struct{})
 	b.done = done
 	b.mu.Unlock()
 
-	go b.reap(cmd, startedAt, controlPath, buf, done)
+	go b.reap(cmd, startedAt, controlPath, controlConfig, buf, done)
 	return nil
 }
 
-// reap waits for the child and records how it ended. Exactly one goroutine
-// per Start generation runs this.
-func (b *Backend) reap(cmd *exec.Cmd, startedAt time.Time, controlPath string, buf *tailBuffer, done chan struct{}) {
+func (b *Backend) reap(cmd *exec.Cmd, startedAt time.Time, controlPath, controlConfig string, buf *tailBuffer, done chan struct{}) {
 	err := cmd.Wait()
 	code := -1
 	if err == nil {
@@ -125,147 +106,266 @@ func (b *Backend) reap(cmd *exec.Cmd, startedAt time.Time, controlPath string, b
 	b.mu.Lock()
 	if b.cmd == cmd {
 		b.running = false
-		b.exit = &ExitInfo{
-			Code:       code,
-			StderrTail: strings.TrimSpace(buf.Tail()),
-			Uptime:     time.Since(startedAt),
-		}
+		b.forwarded = false
+		b.exit = &ExitInfo{Code: code, StderrTail: strings.TrimSpace(buf.Tail()), Uptime: time.Since(startedAt)}
 	}
 	b.mu.Unlock()
-	// Best-effort socket cleanup; ssh normally removes it itself.
 	_ = os.Remove(controlPath)
+	_ = os.Remove(controlConfig)
 	close(done)
 }
 
-// Running reports whether the managed ssh child is currently alive.
 func (b *Backend) Running() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.running
 }
 
-// LastExit returns how the child ended, or nil while it is running or before
-// the first start.
+func (b *Backend) Forwarded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.running && b.forwarded
+}
+
 func (b *Backend) LastExit() *ExitInfo {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.exit
+	if b.exit == nil {
+		return nil
+	}
+	cp := *b.exit
+	return &cp
 }
 
-// ControlPath returns the control socket path of the current or most recent
-// child, or "" if none was ever started.
+func (b *Backend) ConsumeLastExit() *ExitInfo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.exit == nil {
+		return nil
+	}
+	exit := b.exit
+	b.exit = nil
+	cp := *exit
+	return &cp
+}
+
 func (b *Backend) ControlPath() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.controlPath
 }
 
-// Stop terminates the managed child: SIGTERM first (ssh then removes its own
-// control socket and the remote forward closes with the connection), and
-// SIGKILL after the grace period if it is still alive. Only the exact child
-// process this backend spawned is ever signalled.
+// WaitReady waits until `ssh -O check` proves that the spawned master owns its
+// private socket. A running PID alone is not treated as readiness.
+func (b *Backend) WaitReady(ctx context.Context, timeout time.Duration) error {
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		if !b.Running() {
+			if exit := b.LastExit(); exit != nil {
+				return fmt.Errorf("ssh master exited with code %d: %s", exit.Code, exit.StderrTail)
+			}
+			return fmt.Errorf("ssh master exited before control socket was ready")
+		}
+		if err := b.Check(readyCtx); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-readyCtx.Done():
+			return fmt.Errorf("wait for ssh control master: %w (last check: %v)", readyCtx.Err(), lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (b *Backend) Check(ctx context.Context) error {
+	_, err := b.runControl(ctx, "check")
+	return err
+}
+
+// Forward adds the sole loopback-bound reverse forward through the already
+// running master. It never relies on -R surviving ClearAllForwardings.
+func (b *Backend) Forward(ctx context.Context) error {
+	forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", b.Spec.Port, b.Spec.Port)
+	out, err := b.runControl(ctx, "forward", "-R", forward)
+	if err != nil {
+		msg := strings.ToLower(out + " " + err.Error())
+		if strings.Contains(msg, "remote port forwarding failed") ||
+			strings.Contains(msg, "cannot listen to port") ||
+			strings.Contains(msg, "port forwarding failed") {
+			return fmt.Errorf("%w: %s", ErrPortConflict, strings.TrimSpace(out))
+		}
+		return fmt.Errorf("add managed reverse forward: %w: %s", err, strings.TrimSpace(out))
+	}
+	b.mu.Lock()
+	b.forwarded = true
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *Backend) cancel(ctx context.Context) error {
+	if !b.Forwarded() {
+		return nil
+	}
+	forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", b.Spec.Port, b.Spec.Port)
+	_, err := b.runControl(ctx, "cancel", "-R", forward)
+	if err == nil {
+		b.mu.Lock()
+		b.forwarded = false
+		b.mu.Unlock()
+	}
+	return err
+}
+
+// Stop performs bounded control-socket shutdown before signalling only the
+// exact child spawned by this backend.
 func (b *Backend) Stop(grace time.Duration) {
 	b.mu.Lock()
 	cmd := b.cmd
 	done := b.done
 	running := b.running
 	controlPath := b.controlPath
-	if cmd != nil {
-		// Detach this generation: reap still finishes and closes done, but
-		// can no longer touch the backend fields a later Start would reset.
-		b.cmd = nil
-		b.running = false
-		b.done = nil
-	}
+	controlConfig := b.controlConfig
 	b.mu.Unlock()
 
-	if cmd != nil && running && cmd.Process != nil {
-		_ = terminateProcess(cmd.Process)
-		select {
-		case <-done:
-		case <-time.After(grace):
-			_ = cmd.Process.Kill()
-			<-done
+	if cmd != nil && running {
+		controlOK := true
+		cancelCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		if err := b.cancel(cancelCtx); err != nil {
+			controlOK = false
+		}
+		cancel()
+		if controlOK {
+			exitCtx, exitCancel := context.WithTimeout(context.Background(), time.Second)
+			if _, err := b.runControl(exitCtx, "exit"); err != nil {
+				controlOK = false
+			}
+			exitCancel()
+		}
+
+		if controlOK {
+			select {
+			case <-done:
+			case <-time.After(100 * time.Millisecond):
+				controlOK = false
+			}
+		}
+		if !controlOK {
+			if cmd.Process != nil {
+				_ = terminateProcess(cmd.Process)
+			}
+			select {
+			case <-done:
+			case <-time.After(grace):
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+				}
+			}
 		}
 	}
-	if controlPath != "" {
-		_ = os.Remove(controlPath)
+	b.mu.Lock()
+	if b.cmd == cmd {
+		b.cmd = nil
+		b.done = nil
+		b.running = false
+		b.forwarded = false
 	}
+	b.mu.Unlock()
+	_ = os.Remove(controlPath)
+	_ = os.Remove(controlConfig)
 }
 
-// ProbeRemote runs the canonical remote health probe (the tunnel package's
-// RemoteHealthProbeCommand) over the managed master's own control socket and
-// classifies the output with ClassifyRemoteProbeOutput. A transport failure
-// (dead or missing master) returns a non-nil error alongside the fallback
-// classification of whatever output was produced — always fail-closed, never
-// a guessed ok.
 func (b *Backend) ProbeRemote(ctx context.Context, timeout time.Duration) (tunnel.RemoteTunnelState, error) {
-	b.mu.Lock()
-	controlPath := b.controlPath
-	b.mu.Unlock()
-	if controlPath == "" {
-		return tunnel.RemoteTunnelUnknown, fmt.Errorf("managed ssh master not started")
-	}
-
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(probeCtx, b.sshBinary(), b.probeArgs(controlPath, tunnel.RemoteHealthProbeCommand(b.Spec.Port))...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-	state := tunnel.ClassifyRemoteProbeOutput(out.String())
+	out, err := b.runRemote(ctx, timeout, tunnel.RemoteHealthProbeCommand(b.Spec.Port))
+	state := tunnel.ClassifyRemoteProbeOutput(out)
 	if err != nil {
 		return state, fmt.Errorf("remote health probe over control socket: %w", err)
 	}
 	return state, nil
 }
 
-// MasterArgs builds the argv for the managed ssh master. It is exported so
-// the exact command line the supervisor will run stays testable.
-//
-// The option set is deliberately explicit rather than relying on the user's
-// ~/.ssh/config, and it is the safety boundary of the whole backend:
-//
-//   - BatchMode=yes: never wait on an interactive password or keychain
-//     prompt a background supervisor cannot see or answer; auth problems
-//     surface as an immediate exit instead.
-//   - ClearAllForwardings=yes: drop every forwarding inherited from the
-//     user's config, then add exactly one managed reverse forward.
-//   - ExitOnForwardFailure=yes: if the remote bind fails (port already
-//     held), the child exits instead of running forward-less while looking
-//     alive.
-//   - ControlMaster=yes + private ControlPath: the child is a master on a
-//     socket this backend generated; user config cannot redirect it because
-//     command-line -o wins, and no existing user master is ever reused.
-//   - ServerAliveInterval/CountMax: a dead peer is noticed in ~45s instead
-//     of never.
+func (b *Backend) ProbeIdentity(ctx context.Context, timeout time.Duration) (tunnel.RemoteIdentityState, tunnel.IdentityInfo, error) {
+	out, err := b.runRemote(ctx, timeout, tunnel.RemoteIdentityProbeCommand(b.Spec.Port))
+	state, identity := tunnel.ClassifyRemoteIdentityProbeOutput(out)
+	if err != nil {
+		return state, identity, fmt.Errorf("remote identity probe over control socket: %w", err)
+	}
+	return state, identity, nil
+}
+
+func (b *Backend) runRemote(ctx context.Context, timeout time.Duration, remoteCmd string) (string, error) {
+	if err := b.Check(ctx); err != nil {
+		return "", fmt.Errorf("check ssh master: %w", err)
+	}
+	b.mu.Lock()
+	controlPath, controlConfig := b.controlPath, b.controlConfig
+	b.mu.Unlock()
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(probeCtx, b.sshBinary(), b.probeArgs(controlConfig, controlPath, remoteCmd)...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	return out.String(), err
+}
+
+func (b *Backend) runControl(ctx context.Context, operation string, extra ...string) (string, error) {
+	b.mu.Lock()
+	controlPath, controlConfig := b.controlPath, b.controlConfig
+	b.mu.Unlock()
+	if controlPath == "" || controlConfig == "" {
+		return "", fmt.Errorf("managed ssh master not started")
+	}
+	args := b.controlArgs(controlConfig, controlPath, operation, extra...)
+	cmd := exec.CommandContext(ctx, b.sshBinary(), args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	return out.String(), err
+}
+
+// MasterArgs starts a private master with no inherited or command-line
+// forwarding. The user's SSH config is still read to resolve the named host.
 func (b *Backend) MasterArgs(controlPath string) []string {
-	args := []string{
-		"-N", "-T",
+	return []string{
+		"-M", "-N", "-T", "-S", controlPath,
 		"-o", "BatchMode=yes",
 		"-o", "ClearAllForwardings=yes",
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "ControlMaster=yes",
-		"-o", "ControlPath=" + controlPath,
+		"-o", "ControlPersist=no",
+		"-o", "ForwardAgent=no",
+		"-o", "ForwardX11=no",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
-		"-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", b.Spec.Port, b.Spec.Port),
+		"--", b.Spec.Host,
 	}
-	return append(args, b.Spec.Host)
 }
 
-// probeArgs builds the argv for a one-shot probe client multiplexed over the
-// managed master's own socket. BatchMode and ClearAllForwardings keep the
-// probe session from prompting or forwarding anything; ControlPath pins it
-// to this backend's master so it can never attach to a user's socket.
-func (b *Backend) probeArgs(controlPath, remoteCmd string) []string {
+func (b *Backend) controlArgs(config, controlPath, operation string, extra ...string) []string {
+	args := []string{"-F", config, "-S", controlPath, "-o", "BatchMode=yes", "-O", operation}
+	args = append(args, extra...)
+	return append(args, "--", b.Spec.Host)
+}
+
+func (b *Backend) probeArgs(config, controlPath, remoteCmd string) []string {
 	return []string{
+		"-F", config,
+		"-S", controlPath,
 		"-o", "BatchMode=yes",
 		"-o", "ClearAllForwardings=yes",
-		"-o", "ControlPath=" + controlPath,
-		b.Spec.Host,
-		remoteCmd,
+		"--", b.Spec.Host, remoteCmd,
 	}
 }
 
@@ -276,44 +376,47 @@ func (b *Backend) sshBinary() string {
 	return "ssh"
 }
 
-// controlDir resolves the directory that holds the control socket.
-func (b *Backend) controlDir() string {
+func (b *Backend) controlDir() (string, error) {
 	if b.ControlDir != "" {
-		return b.ControlDir
+		return b.ControlDir, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return os.TempDir()
+		return "", fmt.Errorf("resolve control socket directory: %w", err)
 	}
-	return filepath.Join(home, defaultControlDirName)
+	return filepath.Join(home, defaultControlDirName), nil
 }
 
-// newControlSocketPath reserves a unique socket filename inside dir. The
-// name is random per start, so two supervisors can never share or hijack one
-// another's control socket, and ssh creates the socket itself on master
-// startup.
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, stateDirMode); err != nil {
+		return fmt.Errorf("create control socket dir: %w", err)
+	}
+	if err := os.Chmod(dir, stateDirMode); err != nil {
+		return fmt.Errorf("secure control socket dir: %w", err)
+	}
+	return nil
+}
+
 func newControlSocketPath(dir string) (string, error) {
 	var rnd [8]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
 		return "", fmt.Errorf("generate control socket name: %w", err)
 	}
-	path := filepath.Join(dir, "ctl-"+hex.EncodeToString(rnd[:])+".sock")
+	return filepath.Join(dir, "ctl-"+hex.EncodeToString(rnd[:])+".sock"), nil
+}
+
+func newEmptyControlConfig(path string) (string, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, stateFileMode)
 	if err != nil {
-		return "", fmt.Errorf("reserve control socket path: %w", err)
+		return "", fmt.Errorf("create empty control config: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return "", fmt.Errorf("reserve control socket path: %w", err)
-	}
-	if err := os.Remove(path); err != nil {
-		return "", fmt.Errorf("reserve control socket path: %w", err)
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close empty control config: %w", err)
 	}
 	return path, nil
 }
 
-// tailBuffer is a mutex-guarded, size-bounded writer that keeps only the
-// last max bytes. The ssh child writes into it for its whole lifetime; the
-// tail is enough to classify an exit without holding unbounded output.
 type tailBuffer struct {
 	mu  sync.Mutex
 	buf []byte
@@ -330,8 +433,6 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Tail returns the retained bytes; the caller must treat them as
-// diagnostics only.
 func (t *tailBuffer) Tail() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -26,9 +26,8 @@ const (
 )
 
 // Spec is the tunnel configuration the supervisor runs. It is what Phase 1A
-// actually needs to build the ssh command and the probe; anything more
-// (identity files, proxy jump, instance identity) arrives with later phases
-// and real callers.
+// actually needs to build the ssh command and verify the expected daemon
+// identity; anything more arrives with later phases and real callers.
 type Spec struct {
 	// Host is the literal SSH target the user typed (alias or user@host).
 	// No SSH-config resolution is performed — this matches the hosts.json
@@ -39,6 +38,10 @@ type Spec struct {
 	// the local daemon port it targets. cc-clip uses one port for both today
 	// (RemoteForward 18339 127.0.0.1:18339).
 	Port int `json:"port"`
+
+	// ExpectedInstanceID is the installation identity that must answer through
+	// this managed forward before the supervisor may report healthy.
+	ExpectedInstanceID string `json:"expected_instance_id"`
 }
 
 // Runtime is the supervisor's persisted runtime state. It is rebuildable
@@ -56,8 +59,8 @@ type Runtime struct {
 	// name the SSH target, which is why the state file is mode 0600.
 	LastError string `json:"last_error,omitempty"`
 
-	// ConsecutiveStartFailures counts failed child starts since the last one
-	// that reached the stable window. It drives the crash-loop breaker.
+	// ConsecutiveStartFailures counts consecutive children that failed before
+	// the starting gate. It drives the crash-loop breaker.
 	ConsecutiveStartFailures int `json:"consecutive_start_failures,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
@@ -99,6 +102,17 @@ func (s *Store) Path() string {
 	return s.path
 }
 
+// Reset replaces rebuildable Phase 1A state after an explicit operator
+// request. It is the recovery path for a corrupt runtime or an opened circuit
+// breaker; normal supervisor starts never reset state implicitly.
+func (s *Store) Reset(spec Spec) error {
+	return s.Save(&Record{
+		SchemaVersion: schemaVersion,
+		Spec:          spec,
+		Runtime:       Runtime{State: StateUnknown, UpdatedAt: time.Now().UTC()},
+	})
+}
+
 // Load reads and validates the state file. A missing file returns
 // fs.ErrNotExist so callers can distinguish first-run from corruption.
 // Everything that cannot be validated — corrupt JSON, a foreign
@@ -133,6 +147,9 @@ func (s *Store) Save(rec *Record) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), stateDirMode); err != nil {
 		return fmt.Errorf("create tunnel state dir: %w", err)
 	}
+	if err := os.Chmod(filepath.Dir(s.path), stateDirMode); err != nil {
+		return fmt.Errorf("secure tunnel state dir: %w", err)
+	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal tunnel state: %w", err)
@@ -155,6 +172,10 @@ func (s *Store) Save(rec *Record) error {
 		tmp.Close()
 		return fmt.Errorf("write tunnel state tempfile: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync tunnel state tempfile: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tunnel state tempfile: %w", err)
 	}
@@ -175,6 +196,9 @@ func (r *Record) Validate() error {
 	}
 	if r.Spec.Port < 1 || r.Spec.Port > 65535 {
 		return fmt.Errorf("spec.port %d out of range", r.Spec.Port)
+	}
+	if r.Spec.ExpectedInstanceID == "" {
+		return fmt.Errorf("spec.expected_instance_id is empty")
 	}
 	if _, err := ParseState(string(r.Runtime.State)); err != nil {
 		return err

@@ -5,249 +5,460 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/shunmei/cc-clip/internal/token"
 	"github.com/shunmei/cc-clip/internal/tunnel"
 )
 
-// Supervisor defaults. They are fields on the struct so tests can shrink
-// them; the values only have to behave sensibly for a foreground manual run.
 const (
-	defaultProbeInterval      = 30 * time.Second
-	defaultProbeTimeout       = 15 * time.Second
-	defaultStartBackoffBase   = 2 * time.Second
-	defaultStartBackoffMax    = 30 * time.Second
-	defaultStableWindow       = 30 * time.Second
-	defaultStopGrace          = 5 * time.Second
-	defaultCrashLoopThreshold = 5
+	defaultProbeInterval       = 60 * time.Second
+	defaultProbeTimeout        = 15 * time.Second
+	defaultBootstrapTimeout    = 15 * time.Second
+	defaultStartingGate        = 15 * time.Second
+	defaultLocalRetryInterval  = 15 * time.Second
+	defaultRemoteRetryInterval = 15 * time.Second
+	defaultAttentionInterval   = 5 * time.Minute
+	defaultConflictInterval    = 45 * time.Second
+	defaultStartBackoffBase    = time.Second
+	defaultStartBackoffMax     = 5 * time.Minute
+	defaultStableWindow        = 30 * time.Second
+	defaultStopGrace           = 4 * time.Second
+	defaultCrashLoopThreshold  = 5
 )
 
-// Supervisor manages one managed tunnel: it keeps the backend's ssh child
-// alive with bounded backoff, verifies health with the canonical remote
-// probe, persists state transitions to the store, and shuts the child down
-// when its context is cancelled. It is deliberately single-tunnel and
-// synchronous — no scheduling framework, no plugin points.
+var ErrCrashLoopOpen = errors.New("tunnel crash-loop circuit breaker is open; fix the cause and run with --reset")
+
+// Supervisor manages one manually enabled tunnel. Function fields keep the
+// local health boundary testable without replacing the SSH backend itself.
 type Supervisor struct {
 	Spec    Spec
 	Store   *Store
 	Backend *Backend
+	Logf    func(format string, args ...any)
 
-	// Logf receives one line per state transition and probe outcome change.
-	// Nil means silent.
-	Logf func(format string, args ...any)
+	ProbeInterval       time.Duration
+	ProbeTimeout        time.Duration
+	BootstrapTimeout    time.Duration
+	StartingGate        time.Duration
+	LocalRetryInterval  time.Duration
+	RemoteRetryInterval time.Duration
+	AttentionInterval   time.Duration
+	ConflictInterval    time.Duration
+	StartBackoffBase    time.Duration
+	StartBackoffMax     time.Duration
+	StableWindow        time.Duration
+	StopGrace           time.Duration
+	CrashLoopThreshold  int
 
-	ProbeInterval      time.Duration
-	ProbeTimeout       time.Duration
-	StartBackoffBase   time.Duration
-	StartBackoffMax    time.Duration
-	StableWindow       time.Duration
-	StopGrace          time.Duration
-	CrashLoopThreshold int
+	ProbeLocal         func(addr string, timeout time.Duration) error
+	FetchLocalIdentity func(addr, bearerToken string, timeout time.Duration) (tunnel.IdentityInfo, error)
+	ReadLocalToken     func() (string, error)
 
-	mu       sync.Mutex
-	state    State
-	remote   tunnel.RemoteTunnelState
-	lastErr  string
-	failures int
-	lastKey  string
+	mu            sync.Mutex
+	state         State
+	remote        tunnel.RemoteTunnelState
+	lastErr       string
+	failures      int
+	retryFailures int
+	healthySince  time.Time
+	lastKey       string
 }
 
-// NewSupervisor returns a supervisor with production defaults for the given
-// spec, store, and backend.
 func NewSupervisor(spec Spec, store *Store, backend *Backend) *Supervisor {
 	return &Supervisor{
-		Spec:               spec,
-		Store:              store,
-		Backend:            backend,
-		ProbeInterval:      defaultProbeInterval,
-		ProbeTimeout:       defaultProbeTimeout,
-		StartBackoffBase:   defaultStartBackoffBase,
-		StartBackoffMax:    defaultStartBackoffMax,
-		StableWindow:       defaultStableWindow,
-		StopGrace:          defaultStopGrace,
-		CrashLoopThreshold: defaultCrashLoopThreshold,
+		Spec:                spec,
+		Store:               store,
+		Backend:             backend,
+		ProbeInterval:       defaultProbeInterval,
+		ProbeTimeout:        defaultProbeTimeout,
+		BootstrapTimeout:    defaultBootstrapTimeout,
+		StartingGate:        defaultStartingGate,
+		LocalRetryInterval:  defaultLocalRetryInterval,
+		RemoteRetryInterval: defaultRemoteRetryInterval,
+		AttentionInterval:   defaultAttentionInterval,
+		ConflictInterval:    defaultConflictInterval,
+		StartBackoffBase:    defaultStartBackoffBase,
+		StartBackoffMax:     defaultStartBackoffMax,
+		StableWindow:        defaultStableWindow,
+		StopGrace:           defaultStopGrace,
+		CrashLoopThreshold:  defaultCrashLoopThreshold,
+		ProbeLocal:          tunnel.ProbeHealth,
+		FetchLocalIdentity:  tunnel.FetchIdentity,
+		ReadLocalToken:      token.ReadTokenFile,
 	}
 }
 
-// State returns the current aggregate supervisor state.
 func (s *Supervisor) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state
 }
 
-// RemoteState returns the raw remote probe outcome of the last completed
-// probe, or "" if none has run.
 func (s *Supervisor) RemoteState() tunnel.RemoteTunnelState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.remote
 }
 
-// LastError returns the reason for the most recent non-healthy state.
 func (s *Supervisor) LastError() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastErr
 }
 
-// Run drives the supervisor until ctx is cancelled, then stops the managed
-// child and persists StateStopped.
-//
-// A corrupt or unvalidatable state file is a hard error before anything is
-// started: the store contract is fail closed, and the supervisor will not
-// run on top of state it cannot read.
 func (s *Supervisor) Run(ctx context.Context) error {
-	if _, err := s.Store.Load(); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("load tunnel state: %w", err)
-		}
-		// First run for this host: start from an explicit unknown state.
-		fresh := &Record{
-			SchemaVersion: schemaVersion,
-			Spec:          s.Spec,
-			Runtime:       Runtime{State: StateUnknown, UpdatedAt: time.Now().UTC()},
-		}
-		if err := s.Store.Save(fresh); err != nil {
-			return fmt.Errorf("initialize tunnel state: %w", err)
-		}
+	rec, err := s.loadOrInitialize()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.failures = rec.Runtime.ConsecutiveStartFailures
+	s.retryFailures = rec.Runtime.ConsecutiveStartFailures
+	s.remote = rec.Runtime.RemoteState
+	s.lastErr = rec.Runtime.LastError
+	if rec.Runtime.State == StateCrashLoop {
+		s.state = StateCrashLoop
+		s.mu.Unlock()
+		return ErrCrashLoopOpen
+	}
+	if rec.Runtime.State == StateStopped {
+		s.failures = 0
+		s.retryFailures = 0
+	}
+	s.state = StateStarting
+	s.mu.Unlock()
+	if err := s.persist(); err != nil {
+		return err
 	}
 
-	s.mu.Lock()
-	s.state = StateReconnecting
-	s.failures = 0
-	s.mu.Unlock()
-	s.persist()
-
-	for {
-		if ctx.Err() != nil {
-			break
-		}
-		if s.State() == StateCrashLoop {
-			// Circuit breaker open: no automatic restarts. The supervisor
-			// stays alive so the persisted state and logs remain inspectable
-			// until the operator stops it.
-			<-ctx.Done()
-			break
-		}
+	for ctx.Err() == nil {
 		if !s.Backend.Running() {
-			if exit := s.Backend.LastExit(); exit != nil {
-				// A child that ran past the stable window gets a fresh
-				// backoff sequence; rapid crash-looping only counts when
-				// starts never stabilize.
-				if exit.Uptime >= s.StableWindow {
-					s.mu.Lock()
-					s.failures = 0
-					s.mu.Unlock()
+			if exit := s.Backend.ConsumeLastExit(); exit != nil {
+				cause := classifyExit(exit)
+				if err := s.recordStartFailure(cause, exit); err != nil {
+					return s.shutdown(err, false)
 				}
-				s.recordStartFailure(classifyExit(exit), exit)
 				if s.State() == StateCrashLoop {
-					continue
+					return ErrCrashLoopOpen
 				}
-				if !sleepInterruptible(ctx, s.backoff()) {
+				if !sleepInterruptible(ctx, s.retryDelay(cause)) {
 					break
 				}
 			}
+
+			ready, state, reason := s.localReady()
+			if !ready {
+				if err := s.transition(state, "", reason); err != nil {
+					return s.shutdown(err, false)
+				}
+				if state == StateConfigError {
+					return fmt.Errorf("local tunnel configuration: %s", reason)
+				}
+				if !sleepInterruptible(ctx, s.LocalRetryInterval) {
+					break
+				}
+				continue
+			}
+
+			if err := s.transition(StateStarting, "", ""); err != nil {
+				return err
+			}
 			if err := s.Backend.Start(); err != nil {
-				s.recordStartFailure(StateReconnecting, &ExitInfo{
-					Code:       -1,
-					StderrTail: err.Error(),
-				})
+				if err := s.recordStartFailure(StateReconnecting, &ExitInfo{Code: -1, StderrTail: err.Error()}); err != nil {
+					return err
+				}
 				if s.State() == StateCrashLoop {
-					continue
+					return ErrCrashLoopOpen
 				}
 				if !sleepInterruptible(ctx, s.backoff()) {
 					break
 				}
+				continue
+			}
+			if err := s.Backend.WaitReady(ctx, s.BootstrapTimeout); err != nil {
+				if ctx.Err() != nil {
+					s.Backend.Stop(s.StopGrace)
+					break
+				}
+				exit := s.Backend.ConsumeLastExit()
+				s.Backend.Stop(s.StopGrace)
+				stoppedExit := s.Backend.ConsumeLastExit()
+				if exit == nil {
+					exit = stoppedExit
+				}
+				if exit == nil {
+					exit = &ExitInfo{Code: -1, StderrTail: err.Error()}
+				}
+				cause := classifyExit(exit)
+				if err := s.recordStartFailure(cause, exit); err != nil {
+					return err
+				}
+				if s.State() == StateCrashLoop {
+					return ErrCrashLoopOpen
+				}
+				if !sleepInterruptible(ctx, s.retryDelay(cause)) {
+					break
+				}
+				continue
+			}
+		}
+
+		if !s.Backend.Forwarded() {
+			forwardCtx, cancel := context.WithTimeout(ctx, s.ProbeTimeout)
+			err := s.Backend.Forward(forwardCtx)
+			cancel()
+			if err != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				if errors.Is(err, ErrPortConflict) && s.Backend.Running() {
+					checkCtx, checkCancel := context.WithTimeout(ctx, s.ProbeTimeout)
+					checkErr := s.Backend.Check(checkCtx)
+					checkCancel()
+					if checkErr == nil {
+						if err := s.transition(StatePortConflict, "", err.Error()); err != nil {
+							return s.shutdown(err, false)
+						}
+						if !sleepInterruptible(ctx, s.ConflictInterval) {
+							break
+						}
+						continue
+					}
+					err = fmt.Errorf("forward conflict followed by failed master check: %w", checkErr)
+				}
+				s.Backend.Stop(s.StopGrace)
+				_ = s.Backend.ConsumeLastExit()
+				if err := s.recordStartFailure(StateReconnecting, &ExitInfo{Code: -1, StderrTail: err.Error()}); err != nil {
+					return err
+				}
+				if !sleepInterruptible(ctx, s.backoff()) {
+					break
+				}
+				continue
+			}
+		}
+
+		ready, state, reason := s.localReady()
+		if !ready {
+			if err := s.transition(state, "", reason); err != nil {
+				return s.shutdown(err, false)
+			}
+			if state == StateConfigError {
+				return s.shutdown(fmt.Errorf("local tunnel configuration: %s", reason), false)
+			}
+			if !sleepInterruptible(ctx, s.LocalRetryInterval) {
+				break
 			}
 			continue
 		}
 
-		// Child is up: ask the daemon to identify itself through the forward.
 		remote, probeErr := s.Backend.ProbeRemote(ctx, s.ProbeTimeout)
 		if ctx.Err() != nil {
 			break
 		}
-		if probeErr != nil && !s.Backend.Running() {
-			// The master died while probing; the next iteration classifies
-			// the exit and restarts.
-			continue
+		if probeErr != nil {
+			checkCtx, checkCancel := context.WithTimeout(ctx, s.ProbeTimeout)
+			checkErr := s.Backend.Check(checkCtx)
+			checkCancel()
+			if checkErr != nil {
+				s.Backend.Stop(s.StopGrace)
+				continue
+			}
 		}
-		if probeErr == nil && remote.Healthy() {
-			s.transition(StateHealthy, remote, "")
+		if probeErr != nil {
+			if err := s.transition(StateRemoteUnknown, remote, probeErr.Error()); err != nil {
+				return s.shutdown(err, false)
+			}
+		} else if !remote.Healthy() {
+			if err := s.transition(stateForRemote(remote), remote, remote.Summary(s.Spec.Port)); err != nil {
+				return s.shutdown(err, false)
+			}
 		} else {
-			s.transition(StateDegraded, remote, s.degradedReason(remote, probeErr))
+			identityState, identity, identityErr := s.Backend.ProbeIdentity(ctx, s.ProbeTimeout)
+			if ctx.Err() != nil {
+				break
+			}
+			if identityErr != nil {
+				checkCtx, checkCancel := context.WithTimeout(ctx, s.ProbeTimeout)
+				checkErr := s.Backend.Check(checkCtx)
+				checkCancel()
+				if checkErr != nil {
+					s.Backend.Stop(s.StopGrace)
+					continue
+				}
+			}
+			switch {
+			case identityErr != nil:
+				err = s.transition(StateRemoteUnknown, remote, identityErr.Error())
+			case identityState == tunnel.RemoteIdentityUnavailable:
+				err = s.transition(StateProbeUnavailable, remote, "remote tunnel identity helper or endpoint unavailable")
+			case identityState == tunnel.RemoteIdentityTokenInvalid:
+				err = s.transition(StateRemoteTokenInvalid, remote, "remote token rejected by local daemon")
+			case identityState != tunnel.RemoteIdentityOK:
+				err = s.transition(StateRemoteUnknown, remote, "remote tunnel identity probe did not complete")
+			case identity.InstanceID != s.Spec.ExpectedInstanceID:
+				err = s.transition(StateConfigError, remote, "remote tunnel reached a different cc-clip instance")
+				if err == nil {
+					return s.shutdown(fmt.Errorf("remote tunnel identity mismatch"), false)
+				}
+			default:
+				err = s.observeHealthy(remote)
+			}
+			if err != nil {
+				return s.shutdown(err, false)
+			}
 		}
-		if !sleepInterruptible(ctx, s.ProbeInterval) {
+
+		if !sleepInterruptible(ctx, s.nextProbeInterval()) {
 			break
 		}
 	}
+	return s.shutdown(nil, true)
+}
 
-	s.Backend.Stop(s.StopGrace)
+func (s *Supervisor) loadOrInitialize() (*Record, error) {
+	rec, err := s.Store.Load()
+	if err == nil {
+		if rec.Spec != s.Spec {
+			return nil, fmt.Errorf("persisted tunnel spec differs from requested spec; run again with --reset")
+		}
+		return rec, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("load tunnel state: %w (use --reset to reset managed-tunnel runtime)", err)
+	}
+	rec = &Record{
+		SchemaVersion: schemaVersion,
+		Spec:          s.Spec,
+		Runtime:       Runtime{State: StateUnknown, UpdatedAt: time.Now().UTC()},
+	}
+	if err := s.Store.Save(rec); err != nil {
+		return nil, fmt.Errorf("initialize tunnel state: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Supervisor) localReady() (bool, State, string) {
+	addr := fmt.Sprintf("127.0.0.1:%d", s.Spec.Port)
+	if err := s.ProbeLocal(addr, 2*time.Second); err != nil {
+		return false, StateLocalDaemonDown, err.Error()
+	}
+	tok, err := s.ReadLocalToken()
+	if err != nil {
+		return false, StateConfigError, fmt.Sprintf("read local daemon token: %v", err)
+	}
+	identity, err := s.FetchLocalIdentity(addr, tok, 2*time.Second)
+	if err != nil {
+		if errors.Is(err, tunnel.ErrIdentityUnavailable) {
+			return false, StateProbeUnavailable, err.Error()
+		}
+		return false, StateConfigError, err.Error()
+	}
+	if identity.InstanceID != s.Spec.ExpectedInstanceID {
+		return false, StateConfigError, "local daemon instance does not match persisted tunnel spec"
+	}
+	return true, StateHealthy, ""
+}
+
+func stateForRemote(remote tunnel.RemoteTunnelState) State {
+	switch remote {
+	case tunnel.RemoteTunnelDown:
+		return StateRemoteDown
+	case tunnel.RemoteTunnelStale:
+		return StateRemoteStale
+	case tunnel.RemoteTunnelUnverified:
+		return StateRemoteUnverified
+	default:
+		return StateRemoteUnknown
+	}
+}
+
+func (s *Supervisor) recordStartFailure(cause State, exit *ExitInfo) error {
 	s.mu.Lock()
-	s.state = StateStopped
+	oldState := s.state
+	s.healthySince = time.Time{}
+	s.lastErr = fmt.Sprintf("ssh child exited with code %d after %s: %s", exit.Code, exit.Uptime.Round(time.Millisecond), exit.StderrTail)
+	if cause == StateAuthRequired || cause == StateHostKeyError {
+		s.state = cause
+	} else {
+		s.retryFailures++
+		if exit.Uptime < s.StartingGate {
+			s.failures++
+		} else {
+			s.failures = 0
+		}
+		if s.failures >= s.CrashLoopThreshold {
+			s.state = StateCrashLoop
+		} else {
+			s.state = cause
+		}
+	}
 	s.mu.Unlock()
-	s.persist()
+	if err := s.persist(); err != nil {
+		return err
+	}
+	s.logTransition(oldState)
 	return nil
 }
 
-// recordStartFailure bumps the consecutive failure counter, opens the
-// circuit breaker at the threshold, and persists the resulting state.
-func (s *Supervisor) recordStartFailure(cause State, exit *ExitInfo) {
-	s.mu.Lock()
-	s.failures++
-	s.lastErr = fmt.Sprintf("ssh child exited with code %d after %s: %s",
-		exit.Code, exit.Uptime.Round(time.Millisecond), exit.StderrTail)
-	if s.failures >= s.CrashLoopThreshold {
-		s.state = StateCrashLoop
-	} else {
-		s.state = cause
+func (s *Supervisor) retryDelay(cause State) time.Duration {
+	if cause == StateAuthRequired || cause == StateHostKeyError {
+		return s.AttentionInterval
 	}
-	s.mu.Unlock()
-	s.persist()
+	return s.backoff()
 }
 
-// degradedReason builds the operator-facing reason for a failed remote
-// probe. A stale port is the one case where a second, local check adds real
-// information: it separates "our forward is up but the local daemon is down"
-// from "something remote still holds the port" — the exact distinction
-// tunnel.ErrDaemonNotAnswering exists for.
-func (s *Supervisor) degradedReason(remote tunnel.RemoteTunnelState, probeErr error) string {
-	if probeErr != nil {
-		return fmt.Sprintf("remote probe did not complete: %v", probeErr)
-	}
-	reason := remote.Summary(s.Spec.Port)
-	if remote == tunnel.RemoteTunnelStale {
-		addr := fmt.Sprintf("127.0.0.1:%d", s.Spec.Port)
-		if err := tunnel.ProbeHealth(addr, 2*time.Second); err != nil {
-			if errors.Is(err, tunnel.ErrDaemonNotAnswering) {
-				reason += "; local daemon is NOT answering at " + addr
-			} else {
-				reason += "; local daemon unreachable at " + addr
-			}
-		} else {
-			reason += "; local daemon is answering (port likely held on the remote by a stale session)"
-		}
-	}
-	return reason
-}
-
-// transition updates the in-memory state and persists when anything
-// observable changed.
-func (s *Supervisor) transition(state State, remote tunnel.RemoteTunnelState, lastErr string) {
+func (s *Supervisor) transition(state State, remote tunnel.RemoteTunnelState, lastErr string) error {
 	s.mu.Lock()
+	oldState := s.state
+	if state != StateHealthy {
+		s.healthySince = time.Time{}
+	}
 	s.state = state
 	s.remote = remote
 	s.lastErr = lastErr
 	s.mu.Unlock()
-	s.persist()
+	if err := s.persist(); err != nil {
+		return err
+	}
+	s.logTransition(oldState)
+	return nil
 }
 
-// persist writes the current snapshot when it differs from the last written
-// one. Frequency is bounded by real change, not by the probe interval.
-func (s *Supervisor) persist() {
+func (s *Supervisor) observeHealthy(remote tunnel.RemoteTunnelState) error {
+	now := time.Now()
+	s.mu.Lock()
+	if s.state != StateHealthy || s.healthySince.IsZero() {
+		s.healthySince = now
+	}
+	if now.Sub(s.healthySince) >= s.StableWindow {
+		s.retryFailures = 0
+	}
+	s.mu.Unlock()
+	return s.transition(StateHealthy, remote, "")
+}
+
+func (s *Supervisor) nextProbeInterval() time.Duration {
+	s.mu.Lock()
+	state := s.state
+	s.mu.Unlock()
+	if state == StateRemoteDown || state == StateRemoteStale {
+		return s.RemoteRetryInterval
+	}
+	return s.ProbeInterval
+}
+
+func (s *Supervisor) logTransition(oldState State) {
+	if s.Logf != nil && oldState != s.State() {
+		s.Logf("managed tunnel state: %s", s.State())
+	}
+}
+
+func (s *Supervisor) persist() error {
 	s.mu.Lock()
 	rec := &Record{
 		SchemaVersion: schemaVersion,
@@ -263,35 +474,54 @@ func (s *Supervisor) persist() {
 	key := fmt.Sprintf("%s|%s|%s|%d", s.state, s.remote, s.lastErr, s.failures)
 	if key == s.lastKey {
 		s.mu.Unlock()
-		return
+		return nil
 	}
+	s.mu.Unlock()
+	if err := s.Store.Save(rec); err != nil {
+		return fmt.Errorf("persist tunnel state: %w", err)
+	}
+	s.mu.Lock()
 	s.lastKey = key
 	s.mu.Unlock()
-	if err := s.Store.Save(rec); err != nil && s.Logf != nil {
-		s.Logf("persist tunnel state failed: %v", err)
-	}
+	return nil
 }
 
-// backoff returns the delay before the next spawn attempt: exponential from
-// StartBackoffBase, capped at StartBackoffMax.
-func (s *Supervisor) backoff() time.Duration {
-	d := s.StartBackoffBase
-	for i := 1; i < s.failures; i++ {
-		d *= 2
-		if d >= s.StartBackoffMax {
-			return s.StartBackoffMax
+func (s *Supervisor) shutdown(runErr error, stopped bool) error {
+	s.Backend.Stop(s.StopGrace)
+	if stopped {
+		s.mu.Lock()
+		s.state = StateStopped
+		s.mu.Unlock()
+		if err := s.persist(); err != nil && runErr == nil {
+			runErr = err
 		}
 	}
-	if d > s.StartBackoffMax {
-		return s.StartBackoffMax
-	}
-	return d
+	return runErr
 }
 
-// classifyExit maps a child exit to the restart state. Only exit code 255
-// with ssh's own diagnostic strings is classified further; anything else is
-// a plain reconnect. Unknown output never becomes healthy — it becomes a
-// restart with the stderr tail preserved as last_error.
+func (s *Supervisor) backoff() time.Duration {
+	s.mu.Lock()
+	failures := s.retryFailures
+	s.mu.Unlock()
+	d := s.StartBackoffBase
+	for i := 1; i < failures; i++ {
+		next := d * 2
+		if next >= s.StartBackoffMax {
+			d = s.StartBackoffMax
+			break
+		}
+		d = next
+	}
+	if d > s.StartBackoffMax {
+		d = s.StartBackoffMax
+	}
+	jittered := time.Duration(float64(d) * (0.8 + 0.4*rand.Float64()))
+	if jittered > s.StartBackoffMax {
+		return s.StartBackoffMax
+	}
+	return jittered
+}
+
 func classifyExit(exit *ExitInfo) State {
 	if exit == nil {
 		return StateReconnecting
@@ -301,15 +531,13 @@ func classifyExit(exit *ExitInfo) State {
 		if strings.Contains(msg, "permission denied") {
 			return StateAuthRequired
 		}
-		if strings.Contains(msg, "host key verification failed") {
+		if strings.Contains(msg, "host key verification failed") || strings.Contains(msg, "remote host identification has changed") {
 			return StateHostKeyError
 		}
 	}
 	return StateReconnecting
 }
 
-// sleepInterruptible waits for d or ctx cancellation. It reports whether the
-// full delay elapsed.
 func sleepInterruptible(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return ctx.Err() == nil

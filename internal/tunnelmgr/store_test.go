@@ -16,7 +16,7 @@ import (
 func validRecord() *Record {
 	return &Record{
 		SchemaVersion: schemaVersion,
-		Spec:          Spec{Host: "example-host", Port: 18339},
+		Spec:          Spec{Host: "example-host", Port: 18339, ExpectedInstanceID: "instance-123"},
 		Runtime:       Runtime{State: StateHealthy, RemoteState: tunnel.RemoteTunnelOK, UpdatedAt: time.Now().UTC()},
 	}
 }
@@ -100,6 +100,7 @@ func TestStoreLoadRejectsUnknownStates(t *testing.T) {
 		{"empty state", func(r *Record) { r.Runtime.State = State("") }},
 		{"unknown remote state", func(r *Record) { r.Runtime.RemoteState = tunnel.RemoteTunnelState("maybe-ok") }},
 		{"empty host", func(r *Record) { r.Spec.Host = "" }},
+		{"empty expected instance", func(r *Record) { r.Spec.ExpectedInstanceID = "" }},
 		{"port zero", func(r *Record) { r.Spec.Port = 0 }},
 		{"port out of range", func(r *Record) { r.Spec.Port = 70000 }},
 	}
@@ -131,22 +132,44 @@ func TestStoreSaveRejectsInvalidRecord(t *testing.T) {
 }
 
 func TestStateHealthyFailsClosed(t *testing.T) {
-	for s, want := range map[State]bool{
-		StateUnknown:      false,
-		StateHealthy:      true,
-		StateReconnecting: false,
-		StateAuthRequired: false,
-		StateHostKeyError: false,
-		StateDegraded:     false,
-		StateCrashLoop:    false,
-		StateStopped:      false,
-	} {
+	states := []State{
+		StateUnknown, StateStarting, StateHealthy, StateReconnecting,
+		StateLocalDaemonDown, StateAuthRequired, StateHostKeyError,
+		StateRemoteDown, StateRemoteStale, StateRemoteUnverified,
+		StateRemoteUnknown, StateProbeUnavailable, StateRemoteTokenInvalid,
+		StatePortConflict, StateConfigError, StateCrashLoop, StateStopped,
+	}
+	for _, s := range states {
+		want := s == StateHealthy
 		if got := s.Healthy(); got != want {
 			t.Fatalf("State(%q).Healthy() = %v, want %v", s, got, want)
+		}
+		if parsed, err := ParseState(string(s)); err != nil || parsed != s {
+			t.Fatalf("ParseState(%q) = %q, %v", s, parsed, err)
 		}
 	}
 	if _, err := ParseState("restarting-ish"); err == nil {
 		t.Fatal("ParseState must reject unknown states")
+	}
+}
+
+func TestStoreResetRebuildsRuntimeOnlyWhenExplicitlyCalled(t *testing.T) {
+	store := NewStoreAt(filepath.Join(t.TempDir(), "state.json"))
+	rec := validRecord()
+	rec.Runtime.State = StateCrashLoop
+	rec.Runtime.ConsecutiveStartFailures = 5
+	if err := store.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Reset(rec.Spec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec != rec.Spec || got.Runtime.State != StateUnknown || got.Runtime.ConsecutiveStartFailures != 0 {
+		t.Fatalf("reset record = %+v", got)
 	}
 }
 

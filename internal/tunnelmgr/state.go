@@ -12,8 +12,8 @@
 // internal/tunnel (ProbeHealth, RemoteHealthProbeCommand,
 // ClassifyRemoteProbeOutput). Nothing in this package reimplements them, and
 // everything except a proven-healthy state fails closed: a supervisor state
-// is healthy only when the managed ssh child is running AND the remote probe
-// classified the forward as ok.
+// is healthy only when the local daemon, managed ssh child, public remote
+// probe, and authenticated expected-instance probe all pass.
 package tunnelmgr
 
 import "fmt"
@@ -26,14 +26,13 @@ import "fmt"
 type State string
 
 const (
-	// StateUnknown means no validated state exists yet. It is the initial
-	// state of a fresh record and the parse fallback for anything
-	// unrecognized loaded from disk. Never healthy.
-	StateUnknown State = "unknown"
+	// StateUnknown means no validated runtime state exists yet. It is the
+	// initial state of a fresh record and is never healthy.
+	StateUnknown  State = "unknown"
+	StateStarting State = "starting"
 
-	// StateHealthy means the managed ssh child is running and the remote
-	// probe classified the forward as tunnel.RemoteTunnelOK. The only
-	// healthy state.
+	// StateHealthy means all four managed-tunnel health checks passed. It is
+	// the only healthy state.
 	StateHealthy State = "healthy"
 
 	// StateReconnecting means the managed ssh child is not running (spawn
@@ -43,8 +42,7 @@ const (
 
 	// StateAuthRequired means the ssh child exited because authentication
 	// was refused. BatchMode forbids interactive prompts, so this needs a
-	// human (ssh-agent, key, passphrase); the supervisor retries slowly and
-	// stops after CrashLoopThreshold consecutive failures.
+	// human (ssh-agent, key, passphrase); the supervisor retries slowly.
 	StateAuthRequired State = "auth-required"
 
 	// StateHostKeyError means the ssh child exited because the remote host
@@ -52,17 +50,19 @@ const (
 	// checking; a human must fix known_hosts.
 	StateHostKeyError State = "host-key-error"
 
-	// StateDegraded means the ssh child is running but the remote probe did
-	// not classify the forward as ok (down, stale, unverified, or unknown).
-	// The raw probe outcome is preserved in Runtime.RemoteState. The child
-	// is left alone: restarting it cannot fix a remote-side conflict or a
-	// local daemon that is down, and doing so on every failed probe would
-	// churn the connection.
-	StateDegraded State = "degraded"
+	StateLocalDaemonDown    State = "local-daemon-down"
+	StateRemoteDown         State = "remote-down"
+	StateRemoteStale        State = "remote-stale"
+	StateRemoteUnverified   State = "remote-unverified"
+	StateRemoteUnknown      State = "remote-unknown"
+	StateProbeUnavailable   State = "probe-unavailable"
+	StateRemoteTokenInvalid State = "remote-token-invalid"
+	StatePortConflict       State = "port-conflict"
+	StateConfigError        State = "config-error"
 
 	// StateCrashLoop means the supervisor hit CrashLoopThreshold consecutive
 	// failed starts without reaching the stable window. Automatic restarts
-	// stop until the supervisor is restarted by hand.
+	// stop until the operator fixes the cause and explicitly resets runtime.
 	StateCrashLoop State = "crash-loop"
 
 	// StateStopped means the supervisor shut down cleanly (context
@@ -72,7 +72,7 @@ const (
 
 // Healthy reports whether the state proves the data path works end to end.
 // Only StateHealthy qualifies; every other state, including StateUnknown,
-// StateDegraded and StateCrashLoop, fails closed.
+// StateRemoteUnknown and StateCrashLoop, fails closed.
 func (s State) Healthy() bool {
 	return s == StateHealthy
 }
@@ -82,8 +82,11 @@ func (s State) Healthy() bool {
 // future-schema state file can never be read as healthy.
 func ParseState(s string) (State, error) {
 	switch State(s) {
-	case StateUnknown, StateHealthy, StateReconnecting, StateAuthRequired,
-		StateHostKeyError, StateDegraded, StateCrashLoop, StateStopped:
+	case StateUnknown, StateStarting, StateHealthy, StateReconnecting,
+		StateLocalDaemonDown, StateAuthRequired, StateHostKeyError,
+		StateRemoteDown, StateRemoteStale, StateRemoteUnverified,
+		StateRemoteUnknown, StateProbeUnavailable, StateRemoteTokenInvalid,
+		StatePortConflict, StateConfigError, StateCrashLoop, StateStopped:
 		return State(s), nil
 	default:
 		return StateUnknown, fmt.Errorf("unknown tunnel supervisor state %q", s)

@@ -4,9 +4,7 @@ package tunnelmgr
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,18 +21,25 @@ func newTestSupervisor(t *testing.T, port int) (*Supervisor, *Store) {
 	fake := writeFakeSSH(t)
 	storePath := filepath.Join(t.TempDir(), "tunnel-state.json")
 	store := NewStoreAt(storePath)
+	spec := Spec{Host: "fake-host", Port: port, ExpectedInstanceID: "instance-123"}
 	b := &Backend{
-		Spec:       Spec{Host: "fake-host", Port: port},
+		Spec:       spec,
 		SSHBinary:  fake,
 		ControlDir: t.TempDir(),
 	}
-	sup := NewSupervisor(Spec{Host: "fake-host", Port: port}, store, b)
+	sup := NewSupervisor(spec, store, b)
 	sup.ProbeInterval = 30 * time.Millisecond
 	sup.ProbeTimeout = 5 * time.Second
 	sup.StartBackoffBase = 5 * time.Millisecond
 	sup.StartBackoffMax = 20 * time.Millisecond
+	sup.StartingGate = 50 * time.Millisecond
 	sup.StableWindow = 200 * time.Millisecond
 	sup.StopGrace = 2 * time.Second
+	sup.ProbeLocal = func(string, time.Duration) error { return nil }
+	sup.ReadLocalToken = func() (string, error) { return "token", nil }
+	sup.FetchLocalIdentity = func(string, string, time.Duration) (tunnel.IdentityInfo, error) {
+		return tunnel.IdentityInfo{Service: "cc-clip", Status: "ok", ProtocolVersion: 1, InstanceID: "instance-123"}, nil
+	}
 	return sup, store
 }
 
@@ -104,18 +109,19 @@ func TestSupervisorHealthyPathAndCleanStop(t *testing.T) {
 
 // TestSupervisorRemoteNotOKNeverHealthy covers the core fail-closed rule:
 // only a remote probe of `ok` may produce StateHealthy. Every other probe
-// outcome — including unparseable output — must surface as degraded with the
-// raw classification preserved.
+// outcome — including unparseable output — must surface as its own non-healthy
+// state with the raw classification preserved.
 func TestSupervisorRemoteNotOKNeverHealthy(t *testing.T) {
 	cases := []struct {
-		name string
-		out  string
-		want tunnel.RemoteTunnelState
+		name       string
+		out        string
+		wantRemote tunnel.RemoteTunnelState
+		wantState  State
 	}{
-		{"stale", "cc-clip-probe:stale\n", tunnel.RemoteTunnelStale},
-		{"down", "cc-clip-probe:down\n", tunnel.RemoteTunnelDown},
-		{"unverified", "cc-clip-probe:unverified\n", tunnel.RemoteTunnelUnverified},
-		{"unrecognized output", "some motd noise, no marker\n", tunnel.RemoteTunnelUnknown},
+		{"stale", "cc-clip-probe:stale\n", tunnel.RemoteTunnelStale, StateRemoteStale},
+		{"down", "cc-clip-probe:down\n", tunnel.RemoteTunnelDown, StateRemoteDown},
+		{"unverified", "cc-clip-probe:unverified\n", tunnel.RemoteTunnelUnverified, StateRemoteUnverified},
+		{"unrecognized output", "some motd noise, no marker\n", tunnel.RemoteTunnelUnknown, StateRemoteUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,17 +133,17 @@ func TestSupervisorRemoteNotOKNeverHealthy(t *testing.T) {
 			sup, store := newTestSupervisor(t, 18399)
 			cancel, done := runSupervisor(t, sup)
 
-			waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateDegraded }, "degraded state")
+			waitUntil(t, 5*time.Second, func() bool { return sup.State() == tc.wantState }, "independent remote state")
 			if sup.State().Healthy() {
-				t.Fatal("degraded must never be healthy")
+				t.Fatal("failed remote state must never be healthy")
 			}
-			if got := sup.RemoteState(); got != tc.want {
-				t.Fatalf("remote state = %q, want %q", got, tc.want)
+			if got := sup.RemoteState(); got != tc.wantRemote {
+				t.Fatalf("remote state = %q, want %q", got, tc.wantRemote)
 			}
 			waitUntil(t, 5*time.Second, func() bool {
 				rec, err := store.Load()
-				return err == nil && rec.Runtime.State == StateDegraded && rec.Runtime.RemoteState == tc.want
-			}, "persisted degraded state")
+				return err == nil && rec.Runtime.State == tc.wantState && rec.Runtime.RemoteState == tc.wantRemote
+			}, "persisted remote state")
 			cancel()
 			select {
 			case <-done:
@@ -148,81 +154,150 @@ func TestSupervisorRemoteNotOKNeverHealthy(t *testing.T) {
 	}
 }
 
-// TestSupervisorStaleWithLocalDaemonDown checks the one diagnostic that a
-// second probe adds real information to: a stale port plus a locally silent
-// daemon is reported as the daemon being down, via the v0.9.2
-// tunnel.ErrDaemonNotAnswering distinction.
-func TestSupervisorStaleWithLocalDaemonDown(t *testing.T) {
-	t.Run("daemon answering but not cc-clip", func(t *testing.T) {
-		t.Setenv("FAKE_SSH_MODE", "master")
-		t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:stale\n")
-
-		// A non-cc-clip HTTP service occupies the local port, so ProbeHealth
-		// fails with ErrDaemonNotAnswering (TCP up, identity wrong).
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"service":"something-else","status":"ok"}`)
-		}))
-		defer srv.Close()
-		addr := strings.TrimPrefix(srv.URL, "http://127.0.0.1:")
-		port := 0
-		_, _ = fmt.Sscanf(addr, "%d", &port)
-
-		sup, _ := newTestSupervisor(t, port)
-		cancel, done := runSupervisor(t, sup)
-		defer func() {
+func TestSupervisorRequiresAuthenticatedExpectedIdentity(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want State
+	}{
+		{"endpoint unavailable", "cc-clip-identity:unavailable\n", StateProbeUnavailable},
+		{"token rejected", "cc-clip-identity:token-invalid\n", StateRemoteTokenInvalid},
+		{"unknown identity", "cc-clip-identity:unknown\n", StateRemoteUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FAKE_SSH_MODE", "master")
+			t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:ok\n")
+			t.Setenv("FAKE_SSH_IDENTITY_OUT", tc.out)
+			sup, _ := newTestSupervisor(t, 18399)
+			cancel, done := runSupervisor(t, sup)
+			waitUntil(t, 5*time.Second, func() bool { return sup.State() == tc.want }, string(tc.want))
+			if sup.State().Healthy() {
+				t.Fatalf("identity state %q must not be healthy", tc.want)
+			}
 			cancel()
 			<-done
-		}()
+		})
+	}
 
-		waitUntil(t, 5*time.Second, func() bool {
-			return sup.State() == StateDegraded && strings.Contains(sup.LastError(), "NOT answering")
-		}, "stale + ErrDaemonNotAnswering annotation")
-	})
-
-	t.Run("nothing listening locally", func(t *testing.T) {
+	t.Run("different instance is config error", func(t *testing.T) {
 		t.Setenv("FAKE_SSH_MODE", "master")
-		t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:stale\n")
-
-		sup, _ := newTestSupervisor(t, 18399)
-		cancel, done := runSupervisor(t, sup)
-		defer func() {
-			cancel()
-			<-done
-		}()
-
-		waitUntil(t, 5*time.Second, func() bool {
-			return sup.State() == StateDegraded && strings.Contains(sup.LastError(), "unreachable")
-		}, "stale + unreachable annotation")
+		t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:ok\n")
+		t.Setenv("FAKE_SSH_IDENTITY_OUT", `cc-clip-identity:ok:{"service":"cc-clip","status":"ok","protocol_version":1,"instance_id":"other-instance"}`)
+		sup, store := newTestSupervisor(t, 18399)
+		_, done := runSupervisor(t, sup)
+		if err := <-done; err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+			t.Fatalf("Run error = %v, want identity mismatch", err)
+		}
+		rec, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Runtime.State != StateConfigError {
+			t.Fatalf("persisted state = %q, want config-error", rec.Runtime.State)
+		}
 	})
 }
 
-// TestSupervisorCrashLoopStopsRestarting verifies the circuit breaker: an
-// ssh child that can never authenticate leads through auth-required to
-// crash-loop after exactly CrashLoopThreshold starts, and the supervisor
-// then stops spawning processes entirely.
-func TestSupervisorCrashLoopStopsRestarting(t *testing.T) {
-	fake := writeFakeSSH(t)
+func TestSupervisorPortConflictKeepsHealthyMaster(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "master")
+	t.Setenv("FAKE_SSH_FORWARD_MODE", "conflict")
+	sup, _ := newTestSupervisor(t, 18399)
+	sup.ConflictInterval = 30 * time.Millisecond
+	cancel, done := runSupervisor(t, sup)
+	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StatePortConflict }, "port-conflict")
+	if !sup.Backend.Running() || sup.Backend.Forwarded() {
+		t.Fatalf("conflict master state: running=%v forwarded=%v", sup.Backend.Running(), sup.Backend.Forwarded())
+	}
+	time.Sleep(50 * time.Millisecond)
+	if sup.State() == StateCrashLoop {
+		t.Fatal("port conflict must not enter crash-loop")
+	}
+	cancel()
+	<-done
+}
+
+func TestSupervisorPortConflictWithFailedCheckRestartsMaster(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "master")
+	t.Setenv("FAKE_SSH_FORWARD_MODE", "conflict")
+	t.Setenv("FAKE_SSH_CHECK_MODE", "after-conflict")
+	countFile := filepath.Join(t.TempDir(), "count")
+	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
+
+	sup, _ := newTestSupervisor(t, 18399)
+	sup.CrashLoopThreshold = 5
+	cancel, done := runSupervisor(t, sup)
+	waitUntil(t, 5*time.Second, func() bool {
+		data, _ := os.ReadFile(countFile)
+		return strings.Count(string(data), "x") >= 2
+	}, "master restart after conflict check failure")
+	if sup.State() == StatePortConflict {
+		t.Fatal("a master that fails -O check must not be retained as port-conflict")
+	}
+	cancel()
+	<-done
+}
+
+func TestSupervisorAuthRequiredUsesAttentionWait(t *testing.T) {
 	t.Setenv("FAKE_SSH_MODE", "authfail")
+	countFile := filepath.Join(t.TempDir(), "count")
+	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
+	sup, _ := newTestSupervisor(t, 18399)
+	sup.AttentionInterval = 200 * time.Millisecond
+	cancel, done := runSupervisor(t, sup)
+	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateAuthRequired }, "auth-required")
+	time.Sleep(50 * time.Millisecond)
+	data, _ := os.ReadFile(countFile)
+	if got := strings.Count(string(data), "x"); got != 1 {
+		t.Fatalf("auth-required starts = %d, want 1 during attention wait", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestSupervisorLocalDaemonGatePreventsSSHStart(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "master")
+	countFile := filepath.Join(t.TempDir(), "count")
+	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
+	sup, _ := newTestSupervisor(t, 18399)
+	sup.LocalRetryInterval = 20 * time.Millisecond
+	sup.ProbeLocal = func(string, time.Duration) error { return tunnel.ErrDaemonNotAnswering }
+	cancel, done := runSupervisor(t, sup)
+	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateLocalDaemonDown }, "local-daemon-down")
+	time.Sleep(50 * time.Millisecond)
+	if data, _ := os.ReadFile(countFile); len(data) != 0 {
+		t.Fatalf("SSH started while local daemon was down: %q", data)
+	}
+	cancel()
+	<-done
+}
+
+// TestSupervisorCrashLoopStopsRestarting verifies the circuit breaker: an
+// rapidly dying generic SSH children open a persisted circuit breaker.
+func TestSupervisorCrashLoopStopsRestarting(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "die")
+	t.Setenv("FAKE_SSH_UPTIME", "0")
 
 	countFile := filepath.Join(t.TempDir(), "count")
 	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
 
-	storePath := filepath.Join(t.TempDir(), "tunnel-state.json")
-	store := NewStoreAt(storePath)
-	b := &Backend{
-		Spec:       Spec{Host: "fake-host", Port: 18399},
-		SSHBinary:  fake,
-		ControlDir: t.TempDir(),
-	}
-	sup := NewSupervisor(Spec{Host: "fake-host", Port: 18399}, store, b)
+	sup, store := newTestSupervisor(t, 18399)
 	sup.ProbeInterval = 20 * time.Millisecond
-	sup.ProbeTimeout = 5 * time.Second
+	sup.BootstrapTimeout = 500 * time.Millisecond
+	sup.StartingGate = 5 * time.Second
 	sup.StartBackoffBase = 5 * time.Millisecond
 	sup.StartBackoffMax = 15 * time.Millisecond
 	sup.CrashLoopThreshold = 3
 
-	cancel, done := runSupervisor(t, sup)
-	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateCrashLoop }, "crash-loop")
+	_, done := runSupervisor(t, sup)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCrashLoopOpen) {
+			t.Fatalf("Run error = %v, want crash-loop", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop at crash-loop")
+	}
 
 	masterStarts := func() int {
 		data, err := os.ReadFile(countFile)
@@ -231,30 +306,19 @@ func TestSupervisorCrashLoopStopsRestarting(t *testing.T) {
 		}
 		return strings.Count(string(data), "x")
 	}
-	if got := masterStarts(); got != 3 {
-		t.Fatalf("master starts = %d, want exactly CrashLoopThreshold(3)", got)
-	}
-	if !strings.Contains(sup.LastError(), "Permission denied") {
-		t.Fatalf("last error = %q, want the ssh auth diagnostic", sup.LastError())
+	startsAtOpen := masterStarts()
+	if startsAtOpen == 0 || startsAtOpen > sup.CrashLoopThreshold {
+		t.Fatalf("master starts before circuit opened = %d, want 1..%d", startsAtOpen, sup.CrashLoopThreshold)
 	}
 	if sup.State().Healthy() {
 		t.Fatal("crash-loop must never be healthy")
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	if got := masterStarts(); got != 3 {
-		t.Fatalf("supervisor kept restarting in crash-loop: %d starts", got)
+	if got := masterStarts(); got != startsAtOpen {
+		t.Fatalf("supervisor kept restarting in crash-loop: starts changed from %d to %d", startsAtOpen, got)
 	}
 
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run returned error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return after cancel")
-	}
 	final, err := store.Load()
 	if err != nil {
 		t.Fatalf("load final state: %v", err)
@@ -262,13 +326,22 @@ func TestSupervisorCrashLoopStopsRestarting(t *testing.T) {
 	if final.Runtime.ConsecutiveStartFailures != 3 {
 		t.Fatalf("persisted failures = %d, want 3", final.Runtime.ConsecutiveStartFailures)
 	}
+	if final.Runtime.State != StateCrashLoop {
+		t.Fatalf("persisted state = %q, want crash-loop", final.Runtime.State)
+	}
+	second, _ := newTestSupervisor(t, 18399)
+	second.Store = store
+	second.Spec = sup.Spec
+	second.Backend.Spec = sup.Spec
+	if err := second.Run(context.Background()); !errors.Is(err, ErrCrashLoopOpen) {
+		t.Fatalf("restarted supervisor error = %v, want persisted crash-loop", err)
+	}
 }
 
 // TestSupervisorStableExitResetsBackoff verifies the stability gate: a child
 // that ran past StableWindow gets a fresh backoff sequence, so a connection
 // that works and occasionally drops never accumulates into a crash-loop.
 func TestSupervisorStableExitResetsBackoff(t *testing.T) {
-	fake := writeFakeSSH(t)
 	t.Setenv("FAKE_SSH_MODE", "die")
 	t.Setenv("FAKE_SSH_UPTIME", "0.25")
 	t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:ok\n")
@@ -276,14 +349,7 @@ func TestSupervisorStableExitResetsBackoff(t *testing.T) {
 	countFile := filepath.Join(t.TempDir(), "count")
 	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
 
-	storePath := filepath.Join(t.TempDir(), "tunnel-state.json")
-	store := NewStoreAt(storePath)
-	b := &Backend{
-		Spec:       Spec{Host: "fake-host", Port: 18399},
-		SSHBinary:  fake,
-		ControlDir: t.TempDir(),
-	}
-	sup := NewSupervisor(Spec{Host: "fake-host", Port: 18399}, store, b)
+	sup, _ := newTestSupervisor(t, 18399)
 	sup.ProbeInterval = 20 * time.Millisecond
 	sup.ProbeTimeout = 5 * time.Second
 	sup.StartBackoffBase = 5 * time.Millisecond
@@ -316,6 +382,64 @@ func TestSupervisorStableExitResetsBackoff(t *testing.T) {
 	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateHealthy }, "healthy after drops")
 }
 
+func TestSupervisorExitPastStartingGateDoesNotOpenCrashLoop(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "die")
+	t.Setenv("FAKE_SSH_UPTIME", "0.10")
+
+	countFile := filepath.Join(t.TempDir(), "count")
+	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
+
+	sup, _ := newTestSupervisor(t, 18399)
+	sup.StartingGate = 50 * time.Millisecond
+	sup.StableWindow = 500 * time.Millisecond
+	sup.CrashLoopThreshold = 2
+
+	masterStarts := func() int {
+		data, _ := os.ReadFile(countFile)
+		return strings.Count(string(data), "x")
+	}
+	cancel, done := runSupervisor(t, sup)
+	waitUntil(t, 5*time.Second, func() bool { return masterStarts() >= 4 }, "4 starts past starting gate")
+	if sup.State() == StateCrashLoop {
+		t.Fatal("a child that survives the starting gate must not count as a rapid-start crash")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+}
+
+func TestSupervisorBackoffDefaultsAndJitterBounds(t *testing.T) {
+	sup, _ := newTestSupervisor(t, 18399)
+	sup.StartBackoffBase = defaultStartBackoffBase
+	sup.StartBackoffMax = defaultStartBackoffMax
+	if sup.StartBackoffBase != time.Second || sup.StartBackoffMax != 5*time.Minute {
+		t.Fatalf("backoff defaults = %s/%s, want 1s/5m", sup.StartBackoffBase, sup.StartBackoffMax)
+	}
+
+	for failures, nominal := range map[int]time.Duration{
+		1:  time.Second,
+		2:  2 * time.Second,
+		3:  4 * time.Second,
+		9:  4*time.Minute + 16*time.Second,
+		10: 5 * time.Minute,
+	} {
+		sup.mu.Lock()
+		sup.retryFailures = failures
+		sup.mu.Unlock()
+		lower := time.Duration(float64(nominal) * 0.8)
+		upper := time.Duration(float64(nominal) * 1.2)
+		if upper > sup.StartBackoffMax {
+			upper = sup.StartBackoffMax
+		}
+		for i := 0; i < 50; i++ {
+			if got := sup.backoff(); got < lower || got > upper {
+				t.Fatalf("failures=%d backoff=%s, want within [%s,%s]", failures, got, lower, upper)
+			}
+		}
+	}
+}
+
 // TestSupervisorFailsClosedOnCorruptStore verifies the store contract at the
 // supervisor boundary: an unparseable or foreign-schema state file is a hard
 // error before anything is spawned.
@@ -331,12 +455,13 @@ func TestSupervisorFailsClosedOnCorruptStore(t *testing.T) {
 				t.Fatal(err)
 			}
 			store := NewStoreAt(storePath)
+			spec := Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"}
 			b := &Backend{
-				Spec:       Spec{Host: "fake-host", Port: 18399},
+				Spec:       spec,
 				SSHBinary:  fake,
 				ControlDir: t.TempDir(),
 			}
-			sup := NewSupervisor(Spec{Host: "fake-host", Port: 18399}, store, b)
+			sup := NewSupervisor(spec, store, b)
 
 			if err := sup.Run(context.Background()); err == nil {
 				t.Fatal("Run must refuse to start on an unvalidatable state file")

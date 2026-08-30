@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -25,7 +26,7 @@ func TestBackendStopSignalsOnlyOwnedChild(t *testing.T) {
 	t.Setenv("FAKE_SSH_MODE", "master")
 
 	b := &Backend{
-		Spec:       Spec{Host: "fake-host", Port: 18399},
+		Spec:       Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"},
 		SSHBinary:  fake,
 		ControlDir: t.TempDir(),
 	}
@@ -58,6 +59,22 @@ func TestBackendStopSignalsOnlyOwnedChild(t *testing.T) {
 	}
 }
 
+func TestMasterArgsHaveNoForwardAfterOpenSSHParsing(t *testing.T) {
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("system ssh not available")
+	}
+	b := &Backend{Spec: Spec{Host: "example-host", Port: 18399, ExpectedInstanceID: "instance-123"}}
+	args := append([]string{"-G"}, b.MasterArgs(filepath.Join(t.TempDir(), "control.sock"))...)
+	out, err := exec.Command(ssh, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh -G failed: %v: %s", err, out)
+	}
+	if strings.Contains(string(out), "remoteforward ") {
+		t.Fatalf("master unexpectedly contains a reverse forward:\n%s", out)
+	}
+}
+
 // TestBackendStopWithoutStart verifies Stop is a no-op when nothing was ever
 // started — there is no path from it to any process at all.
 func TestBackendStopWithoutStart(t *testing.T) {
@@ -65,7 +82,7 @@ func TestBackendStopWithoutStart(t *testing.T) {
 	t.Setenv("FAKE_SSH_MODE", "master")
 
 	b := &Backend{
-		Spec:       Spec{Host: "fake-host", Port: 18399},
+		Spec:       Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"},
 		SSHBinary:  fake,
 		ControlDir: t.TempDir(),
 	}
@@ -81,12 +98,18 @@ func TestBackendProbeRemoteClassifiesMarker(t *testing.T) {
 	t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:ok\n")
 
 	b := &Backend{
-		Spec:       Spec{Host: "fake-host", Port: 18399},
+		Spec:       Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"},
 		SSHBinary:  fake,
 		ControlDir: t.TempDir(),
 	}
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
+	}
+	if err := b.WaitReady(context.Background(), 5*time.Second); err != nil {
+		t.Fatalf("wait ready: %v", err)
+	}
+	if err := b.Forward(context.Background()); err != nil {
+		t.Fatalf("forward: %v", err)
 	}
 	defer b.Stop(2 * time.Second)
 
@@ -109,7 +132,7 @@ func TestBackendProbeRemoteFailsClosed(t *testing.T) {
 		t.Setenv("FAKE_SSH_PROBE_EXIT", "255")
 
 		b := &Backend{
-			Spec:       Spec{Host: "fake-host", Port: 18399},
+			Spec:       Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"},
 			SSHBinary:  fake,
 			ControlDir: t.TempDir(),
 		}
@@ -128,7 +151,7 @@ func TestBackendProbeRemoteFailsClosed(t *testing.T) {
 	})
 
 	t.Run("no master started is an error", func(t *testing.T) {
-		b := &Backend{Spec: Spec{Host: "fake-host", Port: 18399}, ControlDir: t.TempDir()}
+		b := &Backend{Spec: Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"}, ControlDir: t.TempDir()}
 		state, err := b.ProbeRemote(context.Background(), 2*time.Second)
 		if err == nil {
 			t.Fatal("probing without a master must fail")
@@ -144,7 +167,7 @@ func TestBackendLastExitCapturesStderr(t *testing.T) {
 	t.Setenv("FAKE_SSH_MODE", "authfail")
 
 	b := &Backend{
-		Spec:       Spec{Host: "fake-host", Port: 18399},
+		Spec:       Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"},
 		SSHBinary:  fake,
 		ControlDir: t.TempDir(),
 	}
