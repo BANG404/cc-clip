@@ -178,7 +178,7 @@ func TestNotifyBridgeProbeCommands(t *testing.T) {
 	t.Parallel()
 
 	t.Run("claude hooks probe", func(t *testing.T) {
-		cmd := claudeHooksProbeCommand
+		cmd := claudeHooksProbeCommand(18339)
 		for _, want := range []string{
 			`$HOME/.claude/settings.json`,
 			shim.ClaudeManagedOwnerPrefix, // managed-runner detection key

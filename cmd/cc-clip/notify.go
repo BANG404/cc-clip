@@ -364,7 +364,7 @@ func configureRemoteClaudeHooks(session shim.SessionExecutor, port int, opts con
 		}
 	}
 
-	changed, warnings, err := shim.MergeRemoteClaudeSettingsHooks(session)
+	changed, warnings, err := shim.MergeRemoteClaudeSettingsHooks(session, port)
 	if err == nil {
 		for _, w := range warnings {
 			log.Printf("      warning: %s", w)

@@ -10,7 +10,24 @@ import (
 // claudeManagedHookCommand is the command cc-clip INSERTS for managed events.
 // Per-release this flips; only the suffix changes. The CC_CLIP_MANAGED=1 prefix
 // is the permanent ownership marker.
-const claudeManagedHookCommand = "env CC_CLIP_MANAGED=1 cc-clip plugin run claude-notify"
+//
+// The deployment port is baked in for a non-default port, exactly as it is for
+// Cursor, Codex, Antigravity and opencode. Claude was the one adapter left
+// resolving the port from an environment the hook does not get, so on a host
+// deployed on any other port EVERY Claude notification was posted to 18339 and
+// silently lost — for the flagship agent, while doctor reported the hook as
+// wired because it only looked for the ownership prefix.
+func claudeManagedHookCommand(port int) string {
+	if port == defaultDaemonPort {
+		return "env CC_CLIP_MANAGED=1 cc-clip plugin run claude-notify"
+	}
+	return fmt.Sprintf("env CC_CLIP_MANAGED=1 CC_CLIP_PORT=%d cc-clip plugin run claude-notify", port)
+}
+
+// ClaudeManagedHookCommand exposes the exact command the merge installs, so
+// doctor can check the port actually deployed instead of only the ownership
+// prefix. Same anti-drift contract as ClaudeManagedOwnerPrefix.
+func ClaudeManagedHookCommand(port int) string { return claudeManagedHookCommand(port) }
 
 // claudeManagedHookOwnerPrefix matches the UNION of every cc-clip-owned managed
 // command across releases: legacy "...cc-clip-hook" AND new "...plugin run
@@ -48,12 +65,12 @@ const (
 // event is left untouched. It returns any per-event warnings (e.g. a detected
 // user-authored bare cc-clip-hook the caller should surface) regardless of
 // whether the file changed.
-func MergeRemoteClaudeSettingsHooks(session SessionExecutor) (bool, []string, error) {
+func MergeRemoteClaudeSettingsHooks(session SessionExecutor, port int) (bool, []string, error) {
 	existing, err := readRemoteClaudeSettings(session)
 	if err != nil {
 		return false, nil, err
 	}
-	merged, changed, warnings, err := mergeClaudeHooks(existing)
+	merged, changed, warnings, err := mergeClaudeHooks(existing, port)
 	if err != nil {
 		return false, nil, err
 	}
@@ -176,7 +193,7 @@ trap - EXIT`
 //     current command, skip the rewrite (idempotent). Else append exactly one
 //     current managed matcher. A MIXED state (current + legacy) is repaired:
 //     the legacy is stripped, leaving exactly one current.
-func mergeClaudeHooks(existing []byte) ([]byte, bool, []string, error) {
+func mergeClaudeHooks(existing []byte, port int) ([]byte, bool, []string, error) {
 	if len(bytes.TrimSpace(existing)) == 0 {
 		existing = []byte(`{}`)
 	}
@@ -224,7 +241,7 @@ func mergeClaudeHooks(existing []byte) ([]byte, bool, []string, error) {
 		// Count owner-prefix managed commands BEFORE stripping so we can detect
 		// the idempotent case (exactly one managed command and it is the current
 		// command) versus a mixed/legacy state that needs repair.
-		total, current, err := claudeEventManagedCommandCounts(event, eventHooks)
+		total, current, err := claudeEventManagedCommandCounts(event, eventHooks, port)
 		if err != nil {
 			return nil, false, nil, err
 		}
@@ -246,7 +263,7 @@ func mergeClaudeHooks(existing []byte) ([]byte, bool, []string, error) {
 			"hooks": []any{
 				map[string]any{
 					"type":    "command",
-					"command": claudeManagedHookCommand,
+					"command": claudeManagedHookCommand(port),
 				},
 			},
 		})
@@ -413,7 +430,7 @@ func stripManagedFromEvent(eventHooks []any, event string) (next []any, removed 
 // idempotent-skip guard: exactly one managed command that is already current.
 // Any other shape (legacy present, duplicate current, mixed legacy+current)
 // fails that guard and is repaired by strip-then-insert.
-func claudeEventManagedCommandCounts(event string, eventHooks []any) (total, current int, err error) {
+func claudeEventManagedCommandCounts(event string, eventHooks []any, port int) (total, current int, err error) {
 	for _, rawMatcher := range eventHooks {
 		matcher, ok := rawMatcher.(map[string]any)
 		if !ok {
@@ -436,7 +453,7 @@ func claudeEventManagedCommandCounts(event string, eventHooks []any) (total, cur
 				continue
 			}
 			total++
-			if commandString(command) == claudeManagedHookCommand {
+			if commandString(command) == claudeManagedHookCommand(port) {
 				current++
 			}
 		}

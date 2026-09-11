@@ -20,16 +20,25 @@ import (
 // claudeHooksProbeCommand classifies how (or whether) Claude Code notification
 // hooks are wired on the remote. Managed is checked before user-authored:
 // both patterns can appear in one file and managed is the stronger claim.
-var claudeHooksProbeCommand = fmt.Sprintf(`f="$HOME/.claude/settings.json"
+//
+// The managed branch checks the command for THIS deployment's port, not just
+// the ownership prefix. A hook wired for a different port is still ours and
+// still present, but it posts to a daemon that is not there — reporting it as
+// "wired" is the check agreeing with the bug instead of catching it.
+func claudeHooksProbeCommand(port int) string {
+	return fmt.Sprintf(`f="$HOME/.claude/settings.json"
 if [ ! -f "$f" ]; then
     echo 'claude-hooks:no-file'
 elif grep -qF '%s' "$f"; then
     echo 'claude-hooks:managed'
+elif grep -qF '%s' "$f"; then
+    echo 'claude-hooks:managed-wrong-port'
 elif grep -qF 'cc-clip-hook' "$f"; then
     echo 'claude-hooks:user-authored'
 else
     echo 'claude-hooks:none'
-fi`, shim.ClaudeManagedOwnerPrefix)
+fi`, shim.ClaudeManagedHookCommand(port), shim.ClaudeManagedOwnerPrefix)
+}
 
 // codexNotifyProbeCommand classifies the notify wiring in ~/.codex/config.toml.
 var codexNotifyProbeCommand = fmt.Sprintf(`f="$HOME/.codex/config.toml"
@@ -54,6 +63,8 @@ func classifyClaudeHooksCheck(out string, err error) CheckResult {
 		return CheckResult{"claude-hooks", false, fmt.Sprintf("remote check could not run over SSH: %v (%s)", err, strings.TrimSpace(out))}
 	}
 	switch {
+	case strings.Contains(out, "claude-hooks:managed-wrong-port"):
+		return CheckResult{"claude-hooks", false, "a cc-clip managed hook is wired in ~/.claude/settings.json but for a DIFFERENT port; its notifications go to a daemon that is not there. Re-run 'cc-clip connect <host> --claude --port <port>'"}
 	case strings.Contains(out, "claude-hooks:managed"):
 		return CheckResult{"claude-hooks", true, "managed notify runner wired in ~/.claude/settings.json"}
 	case strings.Contains(out, "claude-hooks:user-authored"):
