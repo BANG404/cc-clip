@@ -315,3 +315,62 @@ func TestEnsureSSHConfig_PreservesExistingDirectives(t *testing.T) {
 		t.Fatal("Host myserver should come before Host *")
 	}
 }
+
+// TestEnsureRewritesConflictingControlMaster pins the first-value-wins rule:
+// appending "ControlMaster no" under an existing "ControlMaster auto" changed
+// nothing, so the pre-existing master was still reused and the RemoteForward
+// still failed silently.
+func TestEnsureRewritesConflictingControlMaster(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	existing := "Host venus\n    ControlMaster auto\n    ControlPath ~/.ssh/cm-%r@%h:%p\n\nHost *\n    ServerAliveInterval 60\n"
+	if err := os.WriteFile(cfg, []byte(existing), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureSSHConfigAt(cfg, "venus", 18339); err != nil {
+		t.Fatalf("ensureSSHConfigAt: %v", err)
+	}
+
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	if strings.Contains(body, "ControlMaster auto") {
+		t.Fatalf("conflicting ControlMaster survived:\n%s", body)
+	}
+	if strings.Contains(body, "cm-%r@%h:%p") {
+		t.Fatalf("conflicting ControlPath survived:\n%s", body)
+	}
+	if strings.Count(body, "ControlMaster") != 1 || strings.Count(body, "ControlPath") != 1 {
+		t.Fatalf("directives must be rewritten in place, not duplicated:\n%s", body)
+	}
+}
+
+// TestEnsureMatchesHostnameForUserAtHostDestination pins the Host pattern: ssh
+// matches on the hostname alone, so a literal "Host user@venus" block never
+// applied and its RemoteForward never took effect.
+func TestEnsureMatchesHostnameForUserAtHostDestination(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	if err := os.WriteFile(cfg, []byte("Host *\n    ServerAliveInterval 60\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureSSHConfigAt(cfg, "bob@venus", 18339); err != nil {
+		t.Fatalf("ensureSSHConfigAt: %v", err)
+	}
+
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	if strings.Contains(body, "Host bob@venus") {
+		t.Fatalf("Host pattern must not carry the user part:\n%s", body)
+	}
+	if !strings.Contains(body, "Host venus") {
+		t.Fatalf("Host pattern must match the hostname:\n%s", body)
+	}
+}
