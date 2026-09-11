@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -142,6 +143,29 @@ func Install(binaryPath string, port int) error {
 	return nil
 }
 
+// serveSubcommandBody matches cc-clip's `serve` SUBCOMMAND — the FIRST token
+// after argv0 — and nothing else on the command line.
+//
+// Two bugs live in the history of this pattern. A bare `serve` substring test
+// selected `cc-clip.exe hotkey myserver --run-loop` ("myserver" contains it)
+// and Uninstall taskkill /F'd the user's hotkey process. Anchoring only on the
+// exe name then still matched `cc-clip.exe send host "C:\images\cc-clip
+// serve.png"`, because the search was free to start anywhere in the line.
+// So the match is anchored at the START of the command line, argv0 is allowed
+// to be quoted or bare, and `serve` must be the token immediately after it.
+//
+// `(?i)` is not decoration: PowerShell's -match is case-INSENSITIVE by default
+// while Go's regexp is not, and the two sides disagreeing on
+// `"C:\tools\CC-CLIP.EXE" serve` made Status and the kill path answer
+// differently about the same process.
+const serveSubcommandBody = `(?i)^\s*"?[^"]*?cc-clip(\.exe)?"?\s+serve(\s|$)`
+
+// serveSubcommandPattern is the same expression as a single-quoted PowerShell
+// literal, derived from the Go source of truth so the two cannot drift.
+var serveSubcommandPattern = "'" + strings.ReplaceAll(serveSubcommandBody, "'", "''") + "'"
+
+var serveSubcommandRE = regexp.MustCompile(serveSubcommandBody)
+
 // startDaemon launches the daemon via wscript.exe. Overridable for testing.
 var startDaemon = func(vbs string) error {
 	cmd := exec.Command("wscript.exe", vbs)
@@ -156,7 +180,7 @@ var startDaemon = func(vbs string) error {
 var stopDaemonProcess = func() error {
 	// Find PID of the running daemon via Get-CimInstance.
 	psCmd := `Get-CimInstance Win32_Process -Filter "name='cc-clip.exe'" -ErrorAction SilentlyContinue | ` +
-		`Where-Object { $_.CommandLine -match 'serve' } | Select-Object -ExpandProperty ProcessId`
+		`Where-Object { $_.CommandLine -match ` + serveSubcommandPattern + ` } | Select-Object -ExpandProperty ProcessId`
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -238,8 +262,14 @@ func Status() (bool, error) {
 	if err != nil {
 		return false, nil // Registry entry exists but daemon not running
 	}
-	if strings.Contains(out, "serve") {
+	if serveSubcommandRE.MatchString(out) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// InstalledPort is not read back on Windows: the update flow that needs it is
+// macOS-only (cmdUpdate returns early on Windows).
+func InstalledPort() (int, bool) {
+	return 0, false
 }

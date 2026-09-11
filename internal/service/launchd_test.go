@@ -144,3 +144,55 @@ func TestStatus_MockLaunchctl(t *testing.T) {
 		t.Error("expected service to not be running")
 	}
 }
+
+// TestInstalledPortRoundTrip pins the port back out of the plist. `cc-clip
+// update` re-registered the service on a hardcoded 18339, moving the daemon off
+// the port every existing SSH tunnel forwards.
+func TestInstalledPortRoundTrip(t *testing.T) {
+	got, ok := parsePlistPort(generatePlist("/usr/local/bin/cc-clip", 19001))
+	if !ok {
+		t.Fatal("port must be readable from a plist this package wrote")
+	}
+	if got != 19001 {
+		t.Fatalf("port = %d, want 19001", got)
+	}
+
+	if _, ok := parsePlistPort("<plist><dict></dict></plist>"); ok {
+		t.Fatal("a plist without --port must report no port, not a default")
+	}
+}
+
+// TestParsePlistPortIgnoresComments pins the scope of the read. A legal XML
+// comment mentioning an older port was taken as configuration, and the caller
+// then moved the running service onto it.
+func TestParsePlistPortIgnoresComments(t *testing.T) {
+	withComment := `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+    <!-- was <string>--port</string><string>19002</string> before the move -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/cc-clip</string>
+        <string>serve</string>
+        <string>--port</string>
+        <string>19001</string>
+    </array>
+</dict>
+</plist>`
+	got, ok := parsePlistPort(withComment)
+	if !ok {
+		t.Fatal("the real ProgramArguments port must still be readable")
+	}
+	if got != 19001 {
+		t.Fatalf("port = %d, want 19001 (a comment was read as configuration)", got)
+	}
+
+	// A port outside ProgramArguments is not configuration either.
+	outside := `<plist version="1.0"><dict>
+    <key>EnvironmentVariables</key><dict><key>PATH</key><string>--port</string><string>19003</string></dict>
+    <key>ProgramArguments</key><array><string>/usr/local/bin/cc-clip</string><string>serve</string></array>
+</dict></plist>`
+	if _, ok := parsePlistPort(outside); ok {
+		t.Fatal("a --port outside ProgramArguments must not be read as the service port")
+	}
+}
