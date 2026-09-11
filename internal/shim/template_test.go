@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestXclipShimSubstitutesPortAndRealBinary(t *testing.T) {
@@ -586,5 +588,72 @@ func TestXclipShimFallbackFailsClearlyWhenRealBinaryIsMissing(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "real xclip binary not found") {
 		t.Fatalf("expected clear missing-binary error, got %q", string(out))
+	}
+}
+
+// TestXclipShimPassesFileArgumentThrough pins the blocking case: `xclip
+// -selection clipboard file.txt` makes the real xclip read the NAMED FILE, but
+// the write branch unconditionally ran `cat > tmp`, so with an interactive stdin
+// still open the shim hung forever and neither the real xclip nor the fallback
+// ever ran.
+func TestXclipShimPassesFileArgumentThrough(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash path and executable semantics are not reliable from Windows test temp dirs")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	tmpDir := t.TempDir()
+	sentinel := filepath.Join(tmpDir, "fallback.log")
+	_, _ = writeFakeCurlWithType(t, tmpDir, "text")
+
+	realBin := filepath.Join(tmpDir, "fake-real")
+	fakeScript := "#!/bin/bash\nprintf '%s\\n' \"$*\" > \"" + bashPath(sentinel) + "\"\nexit 0\n"
+	if err := os.WriteFile(realBin, []byte(fakeScript), 0755); err != nil {
+		t.Fatalf("write fake real: %v", err)
+	}
+
+	payload := filepath.Join(tmpDir, "payload.txt")
+	if err := os.WriteFile(payload, []byte("from a file\n"), 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	port, tokenFile := startMockDaemonWithType(t, tmpDir, "text")
+	shimPath := filepath.Join(tmpDir, "shim.sh")
+	if err := os.WriteFile(shimPath, []byte(XclipShim(port, bashPath(realBin))), 0755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", bashPath(shimPath), "-selection", "clipboard", bashPath(payload))
+	cmd.Env = append(os.Environ(),
+		"PATH="+bashPATH(tmpDir),
+		"CC_CLIP_PORT="+strconv.Itoa(port),
+		"CC_CLIP_TOKEN_FILE="+bashPath(tokenFile),
+		"CC_CLIP_PROBE_TIMEOUT_MS=2000",
+		"CC_CLIP_FETCH_TIMEOUT_MS=5000",
+	)
+	// An open, never-closed stdin is what an interactive shell hands xclip.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	defer stdin.Close()
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shim did not complete with a file argument and an open stdin: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("shim blocked reading stdin instead of passing the file argument through")
+	}
+
+	recorded, readErr := os.ReadFile(sentinel)
+	if readErr != nil {
+		t.Fatalf("the real xclip was never invoked: %v", readErr)
+	}
+	if !strings.Contains(string(recorded), bashPath(payload)) {
+		t.Fatalf("file argument was not forwarded to the real binary: %q", recorded)
 	}
 }
