@@ -152,10 +152,15 @@ func TestIsHealthy_AllGood(t *testing.T) {
 	m.on("cat "+stateDir+"/display", "42", nil)
 	m.on("kill -0 12345", "", nil)
 	m.on("test -S /tmp/.X11-unix/X42", "", nil)
+	// A reusable instance must be one started under X authorization.
+	m.on("test -s "+AuthMarkerPath(stateDir), "", nil)
 
 	state, healthy := IsHealthy(m, stateDir)
 	if !healthy {
 		t.Fatal("expected healthy")
+	}
+	if state.AuthFile != AuthFilePath(stateDir) {
+		t.Fatalf("expected auth file %s, got %s", AuthFilePath(stateDir), state.AuthFile)
 	}
 	if state == nil {
 		t.Fatal("expected non-nil state")
@@ -266,6 +271,7 @@ func TestStartRemote_SocketWaitDoesNotSleepViaExecutor(t *testing.T) {
 	base.on("cat "+stateDir+"/xvfb.pid 2>/dev/null", "", fmt.Errorf("no pid"))
 	base.on("rm -f", "", nil)
 	// The start script returns the chosen display number.
+	base.on("umask 077", "created", nil)
 	base.on("mkdir -p", "42", nil)
 	// PID read (non-2>/dev/null variant used after start).
 	base.on("cat "+stateDir+"/xvfb.pid", "12345", nil)
@@ -311,6 +317,7 @@ func TestStartRemote_EmptyDisplaySurfacesLog(t *testing.T) {
 	m.on("cat "+stateDir+"/xvfb.pid 2>/dev/null", "", fmt.Errorf("no pid"))
 	m.on("rm -f", "", nil)
 	// The start script returns an EMPTY display (the flaky scenario).
+	m.on("umask 077", "created", nil)
 	m.on("mkdir -p", "", nil)
 	// Xvfb's own log explains why; StartRemote must include it in the error.
 	m.on("tail -n 20 "+stateDir+"/xvfb.log", "Fatal server error:\nCannot establish any listening sockets", nil)
@@ -483,5 +490,50 @@ func TestStartRemote_RecoverStale(t *testing.T) {
 	// Cleanup
 	if err := StopRemote(session, stateDir); err != nil {
 		t.Fatalf("StopRemote failed: %v", err)
+	}
+}
+
+// TestStartRemoteRetiresUnauthenticatedInstance pins the orphan case.
+//
+// An instance started before X authorization existed is alive but not
+// reusable. The first version of that check deleted its PID file and started a
+// second server, leaving the first one running — still accepting any local
+// client, and now unreachable by --force or uninstall, both of which read that
+// PID file. The security fix would have been undone by its own restart path.
+func TestStartRemoteRetiresUnauthenticatedInstance(t *testing.T) {
+	stateDir := "/tmp/test-xvfb"
+	m := newMockExecutor()
+
+	m.on("which Xvfb", "/usr/bin/Xvfb", nil)
+	// A live instance is recorded...
+	m.on("cat "+stateDir+"/xvfb.pid", "12345", nil)
+	m.on("cat "+stateDir+"/display", "42", nil)
+	m.on("kill -0 12345", "", nil)
+	m.on("test -S /tmp/.X11-unix/X42", "", nil)
+	// ...but it carries no authorization marker, so it must not be reused.
+	m.on("test -s "+AuthMarkerPath(stateDir), "", fmt.Errorf("no such file"))
+	// It is Xvfb, so it is ours to terminate.
+	m.on("ps -p 12345 -o comm=", "Xvfb", nil)
+	m.on("kill 12345", "", nil)
+	m.on("sleep", "", nil)
+	m.on("rm -f", "", nil)
+	m.on("umask 077", "created", nil)
+	m.on("mkdir -p", "43", nil)
+	m.on("cat "+stateDir+"/xvfb.pid\n", "54321", nil)
+	m.on("test -S /tmp/.X11-unix/X43", "", nil)
+
+	if _, err := StartRemote(m, stateDir); err != nil {
+		t.Fatalf("StartRemote: %v", err)
+	}
+
+	killed := false
+	for _, cmd := range m.execLog {
+		if strings.Contains(cmd, "kill 12345") {
+			killed = true
+		}
+	}
+	if !killed {
+		t.Fatalf("the unauthenticated instance was orphaned instead of terminated; commands were:\n%s",
+			strings.Join(m.execLog, "\n"))
 	}
 }

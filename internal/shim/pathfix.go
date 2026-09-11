@@ -160,6 +160,12 @@ func RemoveRemotePathSession(session RemoteExecutor) error {
 // DISPLAY is set to TCP loopback format (127.0.0.1:{num}) instead of Unix socket
 // format (:{num}) because Codex CLI runs inside a sandbox that blocks access to
 // the Unix socket at /tmp/.X11-unix/. TCP loopback bypasses this restriction.
+//
+// XAUTHORITY is exported alongside it because the display is now started with
+// -auth: without the cookie the server refuses the connection. It is set INSIDE
+// the same "DISPLAY was unset" guard on purpose — exporting it unconditionally
+// would point every X client in the shell, including an ssh -X forwarded one,
+// at cc-clip's private cookie file.
 func displayBlock() string {
 	body := `if [ -z "${DISPLAY:-}" ] && [ -r "$HOME/.cache/cc-clip/codex/display" ]; then
   _cc_clip_display="$(cat "$HOME/.cache/cc-clip/codex/display" 2>/dev/null)"
@@ -170,6 +176,9 @@ func displayBlock() string {
   esac
   if [ -n "$_cc_clip_num" ]; then
     export DISPLAY="127.0.0.1:${_cc_clip_num}"
+    if [ -r "$HOME/.cache/cc-clip/codex/Xauthority" ]; then
+      export XAUTHORITY="$HOME/.cache/cc-clip/codex/Xauthority"
+    fi
   fi
   unset _cc_clip_display _cc_clip_num
 fi`
@@ -203,10 +212,23 @@ func FixDisplaySession(session RemoteExecutor) error {
 	}
 
 	for _, rcFile := range rcFiles {
-		// Check if already injected in this file.
+		// An already-present block is only left alone if it is the CURRENT one.
+		// Skipping on the marker alone froze every host on whatever block it
+		// was first deployed with, so the XAUTHORITY export this release adds
+		// would never have reached an existing Codex host — and the display it
+		// points at now requires that cookie.
 		out, _ := session.Exec(fmt.Sprintf("grep -F %q %s 2>/dev/null || true", displayMarkerStart, rcFile))
 		if strings.Contains(out, displayMarkerStart) {
-			continue
+			current, err := displayBlockIsCurrent(session, rcFile)
+			if err != nil {
+				return fmt.Errorf("failed to inspect DISPLAY block in %s: %w", rcFile, err)
+			}
+			if current {
+				continue
+			}
+			if err := removeDisplayMarkerFrom(session, rcFile); err != nil {
+				return fmt.Errorf("failed to replace outdated DISPLAY block in %s: %w", rcFile, err)
+			}
 		}
 		if err := prependBlock(session, rcFile, block); err != nil {
 			return fmt.Errorf("failed to inject DISPLAY block into %s: %w", rcFile, err)
@@ -216,17 +238,47 @@ func FixDisplaySession(session RemoteExecutor) error {
 	return nil
 }
 
+// displayBlockIsCurrent reports whether the block already in rcFile is exactly
+// the one this release writes.
+func displayBlockIsCurrent(session RemoteExecutor, rcFile string) (bool, error) {
+	out, err := session.Exec(fmt.Sprintf(
+		`sed -n '/%s/,/%s/p' %s 2>/dev/null || true`,
+		sedEscape(displayMarkerStart), sedEscape(displayMarkerEnd), rcFile))
+	if err != nil {
+		return false, err
+	}
+	want := strings.TrimRight(displayBlock(), "\n")
+	return strings.Contains(normalizeRCText(out), normalizeRCText(want)), nil
+}
+
+// normalizeRCText makes rc-file text comparable across transports that may
+// rewrite line endings or pad lines.
+func normalizeRCText(s string) string {
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, strings.TrimRight(line, " \t"))
+	}
+	return strings.Join(out, "\n")
+}
+
+// removeDisplayMarkerFrom strips the DISPLAY marker block from one rc file.
+func removeDisplayMarkerFrom(session RemoteExecutor, rcFile string) error {
+	sedCmd := fmt.Sprintf(
+		`sed -i.cc-clip-bak '/%s/,/%s/d' %s 2>/dev/null; rm -f %s.cc-clip-bak`,
+		sedEscape(displayMarkerStart),
+		sedEscape(displayMarkerEnd),
+		rcFile, rcFile)
+	_, err := session.Exec(sedCmd)
+	return err
+}
+
 // RemoveDisplayMarkerSession removes the DISPLAY marker block from all rc files.
 func RemoveDisplayMarkerSession(session RemoteExecutor) error {
 	// Clean from both bashrc and zshrc since FixDisplaySession writes to both.
 	for _, rcFile := range []string{"~/.bashrc", "~/.zshrc"} {
-		sedCmd := fmt.Sprintf(
-			`sed -i.cc-clip-bak '/%s/,/%s/d' %s 2>/dev/null; rm -f %s.cc-clip-bak`,
-			sedEscape(displayMarkerStart),
-			sedEscape(displayMarkerEnd),
-			rcFile, rcFile)
 		// Ignore errors — file might not exist.
-		session.Exec(sedCmd)
+		_ = removeDisplayMarkerFrom(session, rcFile)
 	}
 	return nil
 }

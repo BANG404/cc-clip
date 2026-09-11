@@ -1148,13 +1148,16 @@ func runConnectCodex(session *shim.SSHSession, opts connectOpts, binaryChanged b
 }
 
 // startBridgeRemote starts the x11-bridge daemon on the remote.
+//
+// XAUTHORITY is part of the environment because the display is started with
+// -auth: an unauthenticated client is refused, which is the point.
 func startBridgeRemote(session *shim.SSHSession, display string, port int, remoteBin string) error {
 	startScript := fmt.Sprintf(
-		`nohup env DISPLAY=":%s" %s x11-bridge --display ":%s" --port %d > %s/bridge.log 2>&1 < /dev/null &
+		`nohup env DISPLAY=":%s" XAUTHORITY=%s %s x11-bridge --display ":%s" --port %d > %s/bridge.log 2>&1 < /dev/null &
 echo $! > %s/bridge.pid
 sleep 0.3
 kill -0 $(cat %s/bridge.pid 2>/dev/null) 2>/dev/null && echo 'bridge:ok' || echo 'bridge:fail'`,
-		display, remoteBin, display, port,
+		display, codexAuthEnvPath(), remoteBin, display, port,
 		codexStateDir, codexStateDir, codexStateDir,
 	)
 	out, err := session.Exec(startScript)
@@ -1165,6 +1168,13 @@ kill -0 $(cat %s/bridge.pid 2>/dev/null) 2>/dev/null && echo 'bridge:ok' || echo
 		return fmt.Errorf("bridge process died immediately after start")
 	}
 	return nil
+}
+
+// codexAuthEnvPath is the X authority file written for `env VAR=value`, where a
+// leading "~" is NOT expanded by every shell. Elsewhere the path appears at the
+// start of a word, where tilde expansion is portable.
+func codexAuthEnvPath() string {
+	return `"$HOME` + strings.TrimPrefix(xvfb.AuthFilePath(codexStateDir), "~") + `"`
 }
 
 // stopBridgeRemote stops the x11-bridge on the remote (safe: verifies command).
