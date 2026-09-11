@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -418,7 +419,16 @@ remote has a valid claude binary installed.
 		}
 		if needsUpload {
 			fmt.Printf("[4/7] Uploading cc-clip binary...\n")
-			// Stop bridge if running — it holds the binary open, preventing overwrite.
+			// Stop bridge if running — it holds the binary open, preventing
+			// overwrite. Record what it was serving first: when THIS run does
+			// not target Codex, nothing downstream restarts it, and a
+			// `connect --claude` on a Codex host silently killed Ctrl+V there.
+			stoppedBridge, restartStopped := "", false
+			if !codexTargeted(opts.targets) {
+				if args, ok := runningBridgeArgs(session); ok {
+					stoppedBridge, restartStopped = args, true
+				}
+			}
 			stopBridgeRemote(session)
 			// Ensure remote directory exists
 			if _, err := session.Exec("mkdir -p ~/.local/bin"); err != nil {
@@ -428,6 +438,20 @@ remote has a valid claude binary installed.
 				log.Fatalf("      failed: %v", err)
 			}
 			fmt.Printf("      uploaded to %s\n", remoteBin)
+			if restartStopped {
+				display, bridgePort, ok := bridgeDisplayPort(stoppedBridge)
+				switch {
+				case !ok:
+					failBridgeRestore(session, remoteState,
+						"an x11-bridge was stopped for the upload but its display/port could not be read")
+				default:
+					if err := startBridgeRemote(session, display, bridgePort, remoteBin); err != nil {
+						failBridgeRestore(session, remoteState,
+							fmt.Sprintf("the x11-bridge stopped for the upload could not be restarted: %v", err))
+					}
+					fmt.Printf("      restarted x11-bridge on DISPLAY=:%s\n", display)
+				}
+			}
 		} else {
 			fmt.Println("[4/7] Binary up to date, skipping upload")
 		}
@@ -441,14 +465,14 @@ remote has a valid claude binary installed.
 	var installOut string
 	var needsShim bool
 	if shimTargeted(opts.targets) {
-		needsShim = force || shim.NeedsShimInstall(remoteState)
+		needsShim = force || shim.NeedsShimInstall(remoteState, port)
 		if !needsShim {
 			// Verify the shim file actually exists — cached state can be stale.
 			shimTarget := "xclip"
 			if remoteState != nil && remoteState.ShimTarget != "" {
 				shimTarget = remoteState.ShimTarget
 			}
-			checkCmd := fmt.Sprintf("test -f ~/.local/bin/%s && head -1 ~/.local/bin/%s | grep -q cc-clip", shimTarget, shimTarget)
+			checkCmd := shimPresenceCheck("~/.local/bin/" + shimTarget)
 			if _, err := session.Exec(checkCmd); err != nil {
 				fmt.Println("      shim missing despite cached state, will reinstall")
 				needsShim = true
@@ -542,6 +566,7 @@ remote has a valid claude binary installed.
 			pathFixed,
 			remoteState,
 			opts.targets,
+			port,
 		)
 	} else {
 		newState, err = newDeployState(
@@ -551,6 +576,7 @@ remote has a valid claude binary installed.
 			pathFixed,
 			remoteState,
 			opts.targets,
+			port,
 		)
 		if err != nil {
 			log.Fatalf("      failed to prepare remote deploy state: %v", err)
@@ -619,7 +645,7 @@ func deployedRegistryVersion(existingRemoteBin *shim.RemoteBinaryInfo) string {
 	return registryVersionOrEmpty()
 }
 
-func newDeployState(localBin, binaryVersion, shimTarget string, pathFixed bool, remoteState *shim.DeployState, targets DeployTargets) (*shim.DeployState, error) {
+func newDeployState(localBin, binaryVersion, shimTarget string, pathFixed bool, remoteState *shim.DeployState, targets DeployTargets, port int) (*shim.DeployState, error) {
 	localHash, err := shim.LocalBinaryHash(localBin)
 	if err != nil {
 		return nil, err
@@ -632,10 +658,11 @@ func newDeployState(localBin, binaryVersion, shimTarget string, pathFixed bool, 
 		pathFixed,
 		remoteState,
 		targets,
+		port,
 	), nil
 }
 
-func newDeployStateFromBinary(binaryHash, binaryVersion, shimTarget string, pathFixed bool, remoteState *shim.DeployState, targets DeployTargets) *shim.DeployState {
+func newDeployStateFromBinary(binaryHash, binaryVersion, shimTarget string, pathFixed bool, remoteState *shim.DeployState, targets DeployTargets, port int) *shim.DeployState {
 	state := &shim.DeployState{
 		BinaryHash:    binaryHash,
 		BinaryVersion: binaryVersion,
@@ -645,6 +672,12 @@ func newDeployStateFromBinary(binaryHash, binaryVersion, shimTarget string, path
 		ShimInstalled: shimTargeted(targets),
 		ShimTarget:    shimTarget,
 		PathFixed:     pathFixed,
+	}
+	// Record WHICH shim this host now carries, so a later release can tell
+	// that its template or port has moved on and reinstall exactly once.
+	if state.ShimInstalled {
+		state.ShimFingerprint = shim.TemplateFingerprint()
+		state.ShimPort = port
 	}
 	if remoteState != nil {
 		state.Notify = remoteState.Notify
@@ -660,6 +693,8 @@ func newDeployStateFromBinary(binaryHash, binaryVersion, shimTarget string, path
 			if remoteState.ShimTarget != "" {
 				state.ShimTarget = remoteState.ShimTarget
 			}
+			state.ShimFingerprint = remoteState.ShimFingerprint
+			state.ShimPort = remoteState.ShimPort
 		}
 	}
 	return state
@@ -1127,7 +1162,7 @@ func runConnectCodex(session *shim.SSHSession, opts connectOpts, binaryChanged b
 		stopBridgeRemote(session)
 	}
 
-	if !needsBridgeRestart && isBridgeHealthy(session) {
+	if !needsBridgeRestart && isBridgeHealthy(session, xvfbState.Display, port) {
 		fmt.Println("      x11-bridge already running, reusing")
 	} else {
 		// Stop any existing bridge first.
@@ -1185,6 +1220,37 @@ kill -0 $(cat %s/bridge.pid 2>/dev/null) 2>/dev/null && echo 'bridge:ok' || echo
 	return nil
 }
 
+// shimPresenceCheck is the remote command that reports whether a cc-clip shim
+// is installed at shimPath.
+//
+// It reads the file HEADER, not just line 1: the shim's first line is the #!
+// and the ownership marker sits on line 2, so a `head -1 | grep cc-clip` probe
+// never matched and every connect reinstalled the shim it had just verified.
+func shimPresenceCheck(shimPath string) string {
+	return fmt.Sprintf("test -f %s && head -c 256 %s | grep -qF cc-clip", shimPath, shimPath)
+}
+
+// failBridgeRestore ends the deploy when a bridge this run stopped could not be
+// brought back.
+//
+// Warning and carrying on reported a successful deployment while leaving
+// deploy.json claiming Codex was enabled and Ctrl+V dead on the remote. The
+// recorded state is corrected first so the next run does not trust a
+// capability that is no longer there.
+func failBridgeRestore(session *shim.SSHSession, remoteState *shim.DeployState, reason string) {
+	if remoteState != nil && remoteState.Codex != nil && remoteState.Codex.Enabled {
+		corrected := *remoteState.Codex
+		corrected.Enabled = false
+		remoteState.Codex = &corrected
+		if err := shim.WriteRemoteState(session, remoteState); err != nil {
+			log.Printf("      warning: could not record the stopped bridge in deploy state: %v", err)
+		}
+	}
+	log.Fatalf("      %s.\n"+
+		"      Codex clipboard support is DOWN on this host and the deploy state now says so.\n"+
+		"      Bring it back with: cc-clip connect <host> --codex", reason)
+}
+
 // codexAuthEnvPath is the X authority file written for `env VAR=value`, where a
 // leading "~" is NOT expanded by every shell. Elsewhere the path appears at the
 // start of a word, where tilde expansion is portable.
@@ -1212,20 +1278,65 @@ rm -f %s/bridge.pid; true`,
 	}
 }
 
-// isBridgeHealthy checks if x11-bridge is running on the remote.
-// Verifies both PID liveness and command name to avoid false positives
-// from stale PID files whose PID was reused by an unrelated process.
-func isBridgeHealthy(session *shim.SSHSession) bool {
+// runningBridgeArgs returns the argv of the x11-bridge this host has running.
+// Verifies both PID liveness and command name to avoid false positives from
+// stale PID files whose PID was reused by an unrelated process.
+func runningBridgeArgs(session *shim.SSHSession) (string, bool) {
+	const begin = "__CC_CLIP_BRIDGE_ARGS__"
 	checkScript := fmt.Sprintf(
 		`pid=$(cat %s/bridge.pid 2>/dev/null) && \
 [ -n "$pid" ] && \
 kill -0 "$pid" 2>/dev/null && \
-ps -p "$pid" -o args= 2>/dev/null | grep -q 'cc-clip x11-bridge' && \
-echo 'ok' || echo 'no'`,
-		codexStateDir,
+args=$(ps -p "$pid" -o args= 2>/dev/null) && \
+case "$args" in *'cc-clip x11-bridge'*) printf '%s%%s\n' "$args" ;; esac; true`,
+		codexStateDir, begin,
 	)
-	out, _ := session.Exec(checkScript)
-	return strings.TrimSpace(out) == "ok"
+	out, err := session.Exec(checkScript)
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, begin); i >= 0 {
+			return strings.TrimSpace(line[i+len(begin):]), true
+		}
+	}
+	return "", false
+}
+
+// bridgeDisplayPort reads the display and daemon port a running bridge was
+// started with, straight off its argv.
+func bridgeDisplayPort(args string) (string, int, bool) {
+	fields := strings.Fields(args)
+	var display string
+	port := -1
+	for i := 0; i+1 < len(fields); i++ {
+		switch fields[i] {
+		case "--display":
+			display = strings.TrimPrefix(fields[i+1], ":")
+		case "--port":
+			if p, err := strconv.Atoi(fields[i+1]); err == nil {
+				port = p
+			}
+		}
+	}
+	if display == "" || port < 0 {
+		return "", 0, false
+	}
+	return display, port, true
+}
+
+// isBridgeHealthy reports whether the running bridge is one this connect can
+// reuse: alive, ours, AND already serving the display and daemon port this run
+// resolved. A PID-liveness-only check happily kept a bridge bound to the
+// previous --port, so `connect --codex --port <new>` silently kept talking to
+// the old daemon.
+func isBridgeHealthy(session *shim.SSHSession, display string, port int) bool {
+	args, ok := runningBridgeArgs(session)
+	if !ok {
+		return false
+	}
+	gotDisplay, gotPort, ok := bridgeDisplayPort(args)
+	return ok && gotDisplay == display && gotPort == port
 }
 
 // dumpRemoteLog prints the last 20 lines of a remote log file.

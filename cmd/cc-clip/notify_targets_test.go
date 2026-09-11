@@ -182,7 +182,7 @@ func TestNewDeployStateShimPreservation(t *testing.T) {
 	prior := &shim.DeployState{ShimInstalled: true, ShimTarget: "wl-paste"}
 
 	// pure --codex: shim NOT targeted -> preserve the prior shim untouched.
-	st, err := newDeployState(bin, "v1", "xclip", true, prior, DeployTargets{Codex: true})
+	st, err := newDeployState(bin, "v1", "xclip", true, prior, DeployTargets{Codex: true}, 18339)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestNewDeployStateShimPreservation(t *testing.T) {
 	}
 
 	// --claude: shim targeted -> reflect the fresh install (xclip).
-	st2, err := newDeployState(bin, "v1", "xclip", true, prior, DeployTargets{Claude: true})
+	st2, err := newDeployState(bin, "v1", "xclip", true, prior, DeployTargets{Claude: true}, 18339)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestNewDeployStateShimPreservation(t *testing.T) {
 	}
 
 	// fresh host (no prior state), pure --codex: must NOT claim a shim.
-	st3, err := newDeployState(bin, "v1", "xclip", true, nil, DeployTargets{Codex: true})
+	st3, err := newDeployState(bin, "v1", "xclip", true, nil, DeployTargets{Codex: true}, 18339)
 	if err != nil {
 		t.Fatal(err)
 	}

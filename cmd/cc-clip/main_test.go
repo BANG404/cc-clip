@@ -280,7 +280,7 @@ func writeTestClaudeWrapper(t *testing.T, home string) {
 }
 
 func TestNewDeployStateReturnsHashError(t *testing.T) {
-	_, err := newDeployState("/nonexistent/cc-clip", "v0.7.2", "xclip", true, nil, DeployTargets{Claude: true})
+	_, err := newDeployState("/nonexistent/cc-clip", "v0.7.2", "xclip", true, nil, DeployTargets{Claude: true}, 18339)
 	if err == nil {
 		t.Fatal("newDeployState should return an error when local binary hashing fails")
 	}
@@ -354,7 +354,7 @@ func TestNewDeployStatePreservesCodexWhenNotRequested(t *testing.T) {
 		Codex:         existingCodex,
 		Notify:        existingNotify,
 		ClaudeWrapper: existingWrapper,
-	}, DeployTargets{Claude: true})
+	}, DeployTargets{Claude: true}, 18339)
 	if err != nil {
 		t.Fatalf("newDeployState returned error: %v", err)
 	}
@@ -381,6 +381,7 @@ func TestNewDeployStateFromBinaryMetadata(t *testing.T) {
 		true,
 		nil,
 		DeployTargets{Claude: true},
+		18339,
 	)
 
 	if state.BinaryHash != hash {
@@ -404,7 +405,7 @@ func TestNewDeployStateDoesNotPreserveCodexWhenRequested(t *testing.T) {
 			Mode:         "x11-bridge",
 			DisplayFixed: true,
 		},
-	}, DeployTargets{Codex: true})
+	}, DeployTargets{Codex: true}, 18339)
 	if err != nil {
 		t.Fatalf("newDeployState returned error: %v", err)
 	}
