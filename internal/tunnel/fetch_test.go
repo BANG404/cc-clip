@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -364,5 +366,52 @@ func TestProbeHealthFailsWhenTCPUpButDaemonDead(t *testing.T) {
 	}
 	if !errors.Is(err, ErrDaemonNotAnswering) {
 		t.Fatalf("expected ErrDaemonNotAnswering, got: %v", err)
+	}
+}
+
+// TestEnsurePrivateOutDirRejectsForeignDir pins the integrity check on the
+// shared-/tmp fallback: a directory this user does not own must not be adopted,
+// because its owner can replace the image behind the returned path.
+func TestEnsurePrivateOutDirRejectsForeignDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ownership is not enforced on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "claude-images")
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	// Owned by us, so this must be accepted — and tightened.
+	if err := ensurePrivateOutDir(dir); err != nil {
+		t.Fatalf("own directory must be usable: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("group/world bits must be cleared, got %v", info.Mode().Perm())
+	}
+
+	// A symlink at the path must not be followed to its target.
+	link := filepath.Join(t.TempDir(), "claude-images")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := ensurePrivateOutDir(link); err == nil {
+		t.Fatal("a symlink at the output path must be refused")
+	}
+}
+
+// TestDefaultOutDirIsPerUserOnSharedTmp pins the fallback name apart per user;
+// os.TempDir() is shared between accounts on Linux.
+func TestDefaultOutDirIsPerUserOnSharedTmp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows temp is already per-user")
+	}
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	got := DefaultOutDir()
+	want := "claude-images-" + strconv.Itoa(os.Getuid())
+	if filepath.Base(got) != want {
+		t.Fatalf("DefaultOutDir() = %q, want basename %q", got, want)
 	}
 }

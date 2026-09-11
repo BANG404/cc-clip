@@ -108,8 +108,8 @@ func (c *Client) FetchImage(outDir string) (string, error) {
 		return "", fmt.Errorf("fetch image failed: response exceeds %dMB limit", limitMB)
 	}
 
-	if err := os.MkdirAll(outDir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create output dir: %w", err)
+	if err := ensurePrivateOutDir(outDir); err != nil {
+		return "", err
 	}
 
 	ext := "png"
@@ -164,11 +164,4 @@ func randomHexSuffix(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
-}
-
-func DefaultOutDir() string {
-	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
-		return filepath.Join(xdg, "claude-images")
-	}
-	return filepath.Join(os.TempDir(), "claude-images")
 }
