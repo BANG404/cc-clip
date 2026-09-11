@@ -366,16 +366,32 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) ListenAndServe() error {
+	listener, err := s.Listen()
+	if err != nil {
+		return err
+	}
+	return s.ServeListener(listener)
+}
+
+// Listen binds the daemon's address without serving on it yet, so a caller can
+// claim the port BEFORE it touches shared state. `serve --rotate-token` used to
+// rewrite the shared token file and only then discover the port was taken,
+// leaving the running daemon's in-memory token and the on-disk one out of sync.
+func (s *Server) Listen() (net.Listener, error) {
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", s.addr, err)
+		return nil, fmt.Errorf("failed to listen on %s: %w", s.addr, err)
 	}
 
 	if err := requireLoopbackListener(listener.Addr()); err != nil {
 		_ = listener.Close()
-		return err
+		return nil, err
 	}
+	return listener, nil
+}
 
+// ServeListener serves on a listener previously returned by Listen.
+func (s *Server) ServeListener(listener net.Listener) error {
 	log.Printf("cc-clip daemon listening on %s", s.addr)
 	return s.httpServer().Serve(listener)
 }
