@@ -29,9 +29,12 @@ type connectOpts struct {
 	useRemoteBin bool
 	targets      DeployTargets // resolved deployment target set (parse + TTY menu); codex/claude/shim phases gate on its membership
 	noNotify     bool
-	noHooks      bool
-	hooks        bool
-	autoRecover  bool
+	// adoptForeignShim forwards the user's consent to the remote installer for
+	// a shim path occupied by a file cc-clip did not write.
+	adoptForeignShim bool
+	noHooks          bool
+	hooks            bool
+	autoRecover      bool
 }
 
 // rejectAutoRecoverWithTokenOnly enforces the spec-mandated mutual
@@ -121,16 +124,17 @@ func cmdConnect() {
 	maybeLegacyCodexNotice(os.Stderr, os.Args[2:], targets)
 
 	runConnect(connectOpts{
-		host:         host,
-		port:         getPort(),
-		force:        hasFlag("force"),
-		tokenOnly:    tokenOnly,
-		useRemoteBin: useRemoteBin,
-		targets:      targets,
-		noNotify:     hasFlag("no-notify"),
-		noHooks:      noHooks,
-		hooks:        hooks,
-		autoRecover:  autoRecover,
+		host:             host,
+		port:             getPort(),
+		force:            hasFlag("force"),
+		tokenOnly:        tokenOnly,
+		useRemoteBin:     useRemoteBin,
+		targets:          targets,
+		noNotify:         hasFlag("no-notify"),
+		adoptForeignShim: hasFlag("adopt-foreign-shim"),
+		noHooks:          noHooks,
+		hooks:            hooks,
+		autoRecover:      autoRecover,
 	})
 }
 
@@ -453,6 +457,9 @@ remote has a valid claude binary installed.
 		if needsShim {
 			fmt.Printf("[5/7] Installing shim...\n")
 			installCmd := fmt.Sprintf("%s install --port %d", remoteBin, port)
+			if opts.adoptForeignShim {
+				installCmd += " --adopt-foreign-shim"
+			}
 			out, err := session.Exec(installCmd)
 			if err != nil {
 				// Shim might already exist, try uninstall then install
@@ -461,6 +468,14 @@ remote has a valid claude binary installed.
 				}
 				out, err = session.Exec(installCmd)
 				if err != nil {
+					// The remote refusal already names the file and the flag;
+					// say where the flag goes from this side so the user does
+					// not have to work out that connect forwards it.
+					if !opts.adoptForeignShim && strings.Contains(out, shim.AdoptFlagHint) {
+						log.Fatalf("      remote install refused to overwrite a file it did not write:\n%s\n\n"+
+							"      Re-run and cc-clip will move it aside instead of destroying it:\n"+
+							"        cc-clip connect %s %s", out, host, shim.AdoptFlagHint)
+					}
 					log.Fatalf("      remote install failed: %s: %v", out, err)
 				}
 			}
