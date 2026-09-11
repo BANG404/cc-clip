@@ -68,10 +68,10 @@ release-local: clean
 		output=dist/$(BINARY)-$${os}-$${arch}; \
 		if [ "$$os" = "windows" ]; then output="$${output}.exe"; fi; \
 		echo "Building $$platform..."; \
-		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o $$output ./cmd/cc-clip/; \
+		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o $$output ./cmd/cc-clip/ || exit 1; \
 		if [ "$$os" = "darwin" ] && [ "$$(uname -s)" = "Darwin" ]; then \
 			echo "  Signing $$output..."; \
-			codesign --force --sign - --identifier com.cc-clip.cli $$output; \
+			codesign --force --sign - --identifier com.cc-clip.cli $$output || exit 1; \
 		fi; \
 	done
 	@echo "Binaries in dist/"
