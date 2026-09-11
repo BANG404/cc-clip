@@ -67,7 +67,7 @@ func cmdSend() {
 		return
 	}
 
-	if err := pasteRemotePath(result.RemotePath, result.LocalImagePath, time.Duration(cfg.delayMS)*time.Millisecond, restoreClipboard); err != nil {
+	if err := pasteRemotePath(nil, result.RemotePath, result.LocalImagePath, time.Duration(cfg.delayMS)*time.Millisecond, restoreClipboard); err != nil {
 		log.Fatalf("send uploaded the image but failed to inject the remote path: %v", err)
 	}
 }
