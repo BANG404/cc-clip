@@ -273,7 +273,7 @@ func RemoteExecViaSession(session *SSHSession, args ...string) (string, error) {
 // in process arguments or shell history.
 func WriteRemoteTokenViaSession(session *SSHSession, tok string) error {
 	cmd := exec.Command("ssh", session.sshArgs(
-		"mkdir -p ~/.cache/cc-clip && cat > ~/.cache/cc-clip/session.token && chmod 600 ~/.cache/cc-clip/session.token")...)
+		"umask 077 && mkdir -p ~/.cache/cc-clip && chmod 700 ~/.cache/cc-clip && cat > ~/.cache/cc-clip/session.token && chmod 600 ~/.cache/cc-clip/session.token")...)
 	cmd.Stdin = strings.NewReader(tok + "\n")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to write remote token: %s: %w", strings.TrimSpace(string(out)), err)
@@ -306,7 +306,7 @@ func GenerateNotificationNonce() (string, error) {
 // ~/.cache/cc-clip/notify.nonce on the remote with chmod 600.
 func WriteRemoteNotificationNonce(session *SSHSession, nonce string) error {
 	cmd := exec.Command("ssh", session.sshArgs(
-		"mkdir -p ~/.cache/cc-clip && cat > ~/.cache/cc-clip/notify.nonce && chmod 600 ~/.cache/cc-clip/notify.nonce")...)
+		"umask 077 && mkdir -p ~/.cache/cc-clip && chmod 700 ~/.cache/cc-clip && cat > ~/.cache/cc-clip/notify.nonce && chmod 600 ~/.cache/cc-clip/notify.nonce")...)
 	cmd.Stdin = strings.NewReader(nonce + "\n")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to write remote notification nonce: %s: %w", strings.TrimSpace(string(out)), err)
@@ -320,7 +320,7 @@ func WriteRemoteNotificationNonce(session *SSHSession, nonce string) error {
 func SetRemoteClaudeHooksEnabled(session SessionExecutor, enabled bool) error {
 	cmd := `mkdir -p ~/.cache/cc-clip && rm -f ~/.cache/cc-clip/no-hooks`
 	if !enabled {
-		cmd = `mkdir -p ~/.cache/cc-clip && : > ~/.cache/cc-clip/no-hooks && chmod 600 ~/.cache/cc-clip/no-hooks`
+		cmd = `umask 077 && mkdir -p ~/.cache/cc-clip && chmod 700 ~/.cache/cc-clip && : > ~/.cache/cc-clip/no-hooks && chmod 600 ~/.cache/cc-clip/no-hooks`
 	}
 	out, err := session.Exec(cmd)
 	if err != nil {
@@ -617,7 +617,7 @@ func codexNotifyManagedBlock(markerStart, markerEnd string, port int) string {
 // WriteRemoteSessionID writes a session ID to ~/.cache/cc-clip/session.id on the remote.
 func WriteRemoteSessionID(session *SSHSession, sessionID string) error {
 	cmd := exec.Command("ssh", session.sshArgs(
-		"mkdir -p ~/.cache/cc-clip && cat > ~/.cache/cc-clip/session.id && chmod 600 ~/.cache/cc-clip/session.id")...)
+		"umask 077 && mkdir -p ~/.cache/cc-clip && chmod 700 ~/.cache/cc-clip && cat > ~/.cache/cc-clip/session.id && chmod 600 ~/.cache/cc-clip/session.id")...)
 	cmd.Stdin = strings.NewReader(sessionID + "\n")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to write remote session ID: %s: %w", strings.TrimSpace(string(out)), err)
