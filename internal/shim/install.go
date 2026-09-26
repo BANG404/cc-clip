@@ -315,11 +315,26 @@ const AdoptFlagHint = "--adopt-foreign-shim"
 // The returned apply function performs the side effect and is called only
 // after EVERY destination has been cleared, so a refusal on the second one
 // cannot leave the first half-applied.
+// adoptedDelegate returns the program an earlier --adopt-foreign-shim install
+// moved aside for path, or "" when there is none.
+//
+// The sidecar is the only durable record of that program: its location was
+// otherwise written only into the shim itself, so the uninstall-then-install
+// cycle connect runs on --force or a port change fell back to a PATH search
+// that skips installDir, and the user's program stopped being called.
+func adoptedDelegate(path string) string {
+	adopted := path + AdoptedSuffix
+	if info, err := os.Lstat(adopted); err == nil && info.Mode().IsRegular() {
+		return adopted
+	}
+	return ""
+}
+
 func prepareShimPath(path string, adoptForeign bool) (delegateTo string, apply func() error, notes []string, err error) {
 	info, statErr := os.Lstat(path)
 	switch {
 	case statErr != nil && os.IsNotExist(statErr):
-		return "", nil, nil, nil
+		return adoptedDelegate(path), nil, nil, nil
 	case statErr != nil:
 		return "", nil, nil, fmt.Errorf("failed to inspect %s: %w", path, statErr)
 	}
@@ -347,7 +362,7 @@ func prepareShimPath(path string, adoptForeign bool) (delegateTo string, apply f
 	}
 
 	if isOurShim(path) {
-		return "", nil, nil, nil
+		return adoptedDelegate(path), nil, nil, nil
 	}
 
 	if !info.Mode().IsRegular() {

@@ -353,3 +353,38 @@ func TestInstallReportsAnIncompleteRollback(t *testing.T) {
 		t.Fatalf("a failed undo must be reported, got: %v", err)
 	}
 }
+
+// TestReinstallKeepsTheAdoptedProgramAsFallback pins the adopt path across the
+// uninstall-then-install cycle connect runs on --force or a port change. The
+// adopted program's location lived only inside the old shim, so the reinstall
+// fell back to a PATH search that skips installDir and lost the user's program.
+func TestReinstallKeepsTheAdoptedProgramAsFallback(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "xclip")
+	if err := os.WriteFile(victim, []byte("#!/bin/sh\necho CUSTOM-FALLBACK\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallWithOptions(TargetXclip, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+		t.Fatalf("adopting install failed: %v", err)
+	}
+	if err := Uninstall(TargetXclip, dir); err != nil {
+		t.Fatalf("uninstall failed: %v", err)
+	}
+
+	res, err := Install(TargetXclip, dir, 18339)
+	if err != nil {
+		t.Fatalf("reinstall failed: %v", err)
+	}
+
+	adopted := victim + AdoptedSuffix
+	if res.RealBinPath != adopted {
+		t.Fatalf("reinstall must keep falling back to the adopted program; RealBinPath = %q, want %q", res.RealBinPath, adopted)
+	}
+	shimBody, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(shimBody), adopted) {
+		t.Fatal("the reinstalled shim does not delegate to the adopted program")
+	}
+}
