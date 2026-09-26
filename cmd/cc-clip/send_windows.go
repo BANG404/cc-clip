@@ -38,15 +38,23 @@ func defaultRemoteHost() (string, bool, error) {
 	return cfg.Host, true, nil
 }
 
-func pasteRemotePath(remotePath, imagePath string, delay time.Duration, restoreClipboard bool) error {
-	// Pin the window this paste is aimed at BEFORE touching the clipboard.
-	// The keystroke below goes to whatever is focused when it fires. Without
-	// this guard a window switch during `delay` delivers the remote path into
-	// whatever the user moved to — a password manager, a chat box, a browser
-	// URL bar.
-	guard, err := newFocusGuard(systemFocusProbe)
-	if err != nil {
-		return err
+// pasteRemotePath puts remotePath on the clipboard and sends the paste
+// keystroke to the window guard was captured against.
+//
+// guard may be nil, in which case the target is pinned here — the right
+// behaviour for `cc-clip send --paste`, where the user is looking at the window
+// they invoked it from. Callers that do slow work between the user's gesture
+// and this call MUST capture the guard at the gesture instead: the keystroke
+// goes to whatever is focused when it fires, so a window switch in between
+// would otherwise deliver the remote path into a password manager, a chat box,
+// or a browser URL bar and the guard would still say the target was correct.
+func pasteRemotePath(guard *focusGuard, remotePath, imagePath string, delay time.Duration, restoreClipboard bool) error {
+	if guard == nil {
+		var err error
+		guard, err = newFocusGuard(systemFocusProbe)
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := windowsSetClipboardText(remotePath); err != nil {

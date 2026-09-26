@@ -219,17 +219,46 @@ func TestNeedsShimInstall(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "shim installed",
+			// No fingerprint means the state predates template tracking, so
+			// the template it carries is unknown and must be refreshed once.
+			name: "shim installed by an older release",
 			remote: &DeployState{
 				ShimInstalled: true,
 			},
+			want: true,
+		},
+		{
+			name: "shim installed with the current template and port",
+			remote: &DeployState{
+				ShimInstalled:   true,
+				ShimFingerprint: TemplateFingerprint(),
+				ShimPort:        18339,
+			},
 			want: false,
+		},
+		{
+			name: "template has moved on",
+			remote: &DeployState{
+				ShimInstalled:   true,
+				ShimFingerprint: "0000000000000000",
+				ShimPort:        18339,
+			},
+			want: true,
+		},
+		{
+			name: "deployment port has changed",
+			remote: &DeployState{
+				ShimInstalled:   true,
+				ShimFingerprint: TemplateFingerprint(),
+				ShimPort:        29999,
+			},
+			want: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NeedsShimInstall(tt.remote)
+			got := NeedsShimInstall(tt.remote, 18339)
 			if got != tt.want {
 				t.Errorf("NeedsShimInstall() = %v, want %v", got, tt.want)
 			}

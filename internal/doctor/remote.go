@@ -89,7 +89,7 @@ func RunRemote(host string, port int) []CheckResult {
 	results = append(results, classifyHookScriptCheck(out, err))
 	out, err = remoteExecNoForward(host, notifyNonceProbeCommand)
 	results = append(results, classifyNotifyNonceCheck(out, err))
-	out, err = remoteExecNoForward(host, claudeHooksProbeCommand)
+	out, err = remoteExecNoForward(host, claudeHooksProbeCommand(port))
 	results = append(results, classifyClaudeHooksCheck(out, err))
 	out, err = remoteExecNoForward(host, codexNotifyProbeCommand)
 	results = append(results, classifyCodexNotifyCheck(out, err))

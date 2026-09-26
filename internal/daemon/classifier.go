@@ -12,14 +12,19 @@ import (
 // "stop", etc.) and raw is the decoded JSON body.
 func ClassifyHookPayload(hookType string, raw map[string]any) *NotifyEnvelope {
 	host, _ := raw["_cc_clip_host"].(string)
+	// The agent's own session id, when the hook payload carries one. It is part
+	// of the dedup identity: without it two concurrent sessions on ONE host
+	// produce byte-identical turn-complete text and silence each other.
+	sessionID, _ := raw["session_id"].(string)
 	env := &NotifyEnvelope{
 		Kind:      KindToolAttention,
 		Source:    "claude_hook",
 		Host:      host,
 		Timestamp: time.Now().UTC(),
 		ToolAttention: &ToolAttentionPayload{
-			HookType: hookType,
-			Verified: true,
+			SessionID: sessionID,
+			HookType:  hookType,
+			Verified:  true,
 		},
 		GenericMessage: &GenericMessagePayload{Verified: true},
 	}

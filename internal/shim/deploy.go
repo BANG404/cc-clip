@@ -85,15 +85,24 @@ const currentDeploySchemaVersion = 2
 // DeployState represents the state of a cc-clip deployment on a remote host.
 // It is stored as ~/.cache/cc-clip/deploy.json on the remote.
 type DeployState struct {
-	SchemaVersion int                 `json:"schema_version,omitempty"`
-	BinaryHash    string              `json:"binary_hash"`
-	BinaryVersion string              `json:"binary_version"`
-	ShimInstalled bool                `json:"shim_installed"`
-	ShimTarget    string              `json:"shim_target"`
-	PathFixed     bool                `json:"path_fixed"`
-	Notify        *NotifyDeployState  `json:"notify,omitempty"`
-	Codex         *CodexDeployState   `json:"codex,omitempty"`
-	ClaudeWrapper *ClaudeWrapperState `json:"claude_wrapper,omitempty"`
+	SchemaVersion int    `json:"schema_version,omitempty"`
+	BinaryHash    string `json:"binary_hash"`
+	BinaryVersion string `json:"binary_version"`
+	ShimInstalled bool   `json:"shim_installed"`
+	ShimTarget    string `json:"shim_target"`
+	// ShimFingerprint and ShimPort describe WHICH shim is installed, not just
+	// that one is. Without them a correct presence probe pins every existing
+	// host to whatever template it was first deployed with: the probe answers
+	// "installed", NeedsShimInstall answers false, and no template fix ever
+	// reaches it again. The previously-broken `head -1` probe was accidentally
+	// carrying template updates by reinstalling on every connect, so fixing
+	// the probe is what made this reachable.
+	ShimFingerprint string              `json:"shim_fingerprint,omitempty"`
+	ShimPort        int                 `json:"shim_port,omitempty"`
+	PathFixed       bool                `json:"path_fixed"`
+	Notify          *NotifyDeployState  `json:"notify,omitempty"`
+	Codex           *CodexDeployState   `json:"codex,omitempty"`
+	ClaudeWrapper   *ClaudeWrapperState `json:"claude_wrapper,omitempty"`
 
 	// UseRemoteBin records that this host's cc-clip executable is owned by a
 	// package manager on the remote (--use-remote-bin, #110). connect reads it
@@ -296,11 +305,17 @@ func NeedsUpload(localBinPath string, remote *DeployState) bool {
 }
 
 // NeedsShimInstall checks whether the shim needs to be (re-)installed.
-func NeedsShimInstall(remote *DeployState) bool {
-	if remote == nil {
+func NeedsShimInstall(remote *DeployState, port int) bool {
+	if remote == nil || !remote.ShimInstalled {
 		return true
 	}
-	return !remote.ShimInstalled
+	// An older deploy state carries no fingerprint. Treat that as "unknown
+	// template" and reinstall once, which is how existing hosts pick up the
+	// template fixes shipped alongside this field.
+	if remote.ShimFingerprint != TemplateFingerprint() {
+		return true
+	}
+	return remote.ShimPort != port
 }
 
 // NeedsNotifySetup checks whether notification bridge setup is needed on the remote.

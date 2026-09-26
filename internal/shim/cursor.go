@@ -27,7 +27,21 @@ import (
 //   - `env` leads, which makes the command work whether or not Cursor passes it
 //     through a shell: if it does, sh expands $HOME; if it does not, `env`
 //     itself resolves from any standard PATH and then runs sh.
-const cursorManagedHookCommand = `env CC_CLIP_MANAGED=1 sh -c 'exec "$HOME/.local/bin/cc-clip" plugin run cursor-notify'`
+//   - The deployment port is baked in for a non-default port. The runner
+//     resolves the port from CC_CLIP_PORT, and Cursor gives a hook the system
+//     environment, not the remote shell's — so without this the hook posted to
+//     18339 on a host deployed on any other port.
+func cursorManagedHookCommand(port int) string {
+	env := "env CC_CLIP_MANAGED=1"
+	if port != defaultDaemonPort {
+		env = fmt.Sprintf("env CC_CLIP_MANAGED=1 CC_CLIP_PORT=%d", port)
+	}
+	return env + ` sh -c 'exec "$HOME/.local/bin/cc-clip" plugin run cursor-notify'`
+}
+
+// defaultDaemonPort mirrors the cmd layer's default; a hook deployed on it
+// needs no CC_CLIP_PORT override.
+const defaultDaemonPort = 18339
 
 // cursorManagedHookOwnerPrefix is the permanent ownership marker. Merge and
 // strip key off this rather than off the full command so a future change to
@@ -80,12 +94,12 @@ func RemoteHasCursor(session RemoteExecutor) (bool, error) {
 //
 // Idempotent: when the stop event already holds exactly one cc-clip command and
 // it is the current one, nothing is written.
-func MergeRemoteCursorHooks(session SessionExecutor) (bool, error) {
+func MergeRemoteCursorHooks(session SessionExecutor, port int) (bool, error) {
 	existing, err := readRemoteCursorHooks(session)
 	if err != nil {
 		return false, err
 	}
-	merged, changed, err := mergeCursorHooks(existing)
+	merged, changed, err := mergeCursorHooks(existing, port)
 	if err != nil {
 		return false, err
 	}
@@ -125,12 +139,12 @@ func RemoveRemoteCursorManagedHooks(session SessionExecutor) (bool, error) {
 // detectInstallAdapter install signature. The port is unused: the Cursor hook
 // runs `cc-clip plugin run cursor-notify` on the remote, and that subcommand
 // resolves the daemon port itself, exactly as the Claude managed hook does.
-func EnsureRemoteCursorHooks(session RemoteExecutor, _ int) error {
+func EnsureRemoteCursorHooks(session RemoteExecutor, port int) error {
 	sess, ok := session.(SessionExecutor)
 	if !ok {
 		return fmt.Errorf("cursor hook install needs a session that can write stdin")
 	}
-	if _, err := MergeRemoteCursorHooks(sess); err != nil {
+	if _, err := MergeRemoteCursorHooks(sess, port); err != nil {
 		return err
 	}
 	return nil
@@ -192,7 +206,7 @@ trap - EXIT`
 //
 // An unparseable existing file is an error rather than a silent overwrite: the
 // user's hooks are not ours to discard because we could not read them.
-func mergeCursorHooks(existing []byte) ([]byte, bool, error) {
+func mergeCursorHooks(existing []byte, port int) ([]byte, bool, error) {
 	doc, err := decodeCursorHooks(existing)
 	if err != nil {
 		return nil, false, err
@@ -202,11 +216,11 @@ func mergeCursorHooks(existing []byte) ([]byte, bool, error) {
 	event := commandList(hooks[cursorStopEvent])
 
 	kept, managed := partitionCursorCommands(event)
-	if managed == 1 && cursorCommandIsCurrent(event) {
+	if managed == 1 && cursorCommandIsCurrent(event, port) {
 		return nil, false, nil
 	}
 
-	hooks[cursorStopEvent] = append(kept, newCursorManagedCommand())
+	hooks[cursorStopEvent] = append(kept, newCursorManagedCommand(port))
 	doc["hooks"] = hooks
 	if _, ok := doc["version"]; !ok {
 		doc["version"] = cursorHooksSchemaVersion
@@ -328,7 +342,7 @@ func isManagedCursorCommand(entry any) bool {
 // cursorCommandIsCurrent reports whether the event's single managed command is
 // byte-identical to what this release would write. Only then is the merge a
 // no-op; a legacy command still has to be rewritten.
-func cursorCommandIsCurrent(event []any) bool {
+func cursorCommandIsCurrent(event []any, port int) bool {
 	for _, entry := range event {
 		obj, ok := entry.(map[string]any)
 		if !ok {
@@ -338,7 +352,7 @@ func cursorCommandIsCurrent(event []any) bool {
 		if !strings.HasPrefix(cmd, cursorManagedHookOwnerPrefix) {
 			continue
 		}
-		if cmd != cursorManagedHookCommand {
+		if cmd != cursorManagedHookCommand(port) {
 			return false
 		}
 		timeout, _ := obj["timeout"].(float64)
@@ -347,9 +361,9 @@ func cursorCommandIsCurrent(event []any) bool {
 	return false
 }
 
-func newCursorManagedCommand() map[string]any {
+func newCursorManagedCommand(port int) map[string]any {
 	return map[string]any{
-		"command": cursorManagedHookCommand,
+		"command": cursorManagedHookCommand(port),
 		"timeout": cursorHookTimeoutSeconds,
 	}
 }

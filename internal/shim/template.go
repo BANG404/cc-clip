@@ -1,6 +1,10 @@
 package shim
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+)
 
 const xclipShimTemplate = `#!/bin/bash
 # cc-clip xclip shim - intercepts Claude Code clipboard calls
@@ -240,10 +244,18 @@ case "$ARGS" in
         # remote tools that copy via xclip (neovim unnamedplus, tmux
         # copy-command, TUI copy actions) land on the LOCAL clipboard too.
         # Unrecognized READ shapes carrying -o must keep the old fallback,
-        # so scan argv for the output flag first.
+        # so scan argv for the output flag first. The same scan rejects a FILE
+        # argument (xclip reads the named file instead of stdin): "cat > tmp"
+        # below would block forever waiting for an EOF that never comes, and
+        # neither the real xclip nor the fallback would ever run.
+        _cc_clip_skip=0
         for _cc_clip_arg in "$@"; do
+            if [ "$_cc_clip_skip" -eq 1 ]; then _cc_clip_skip=0; continue; fi
             case "$_cc_clip_arg" in
                 -o|-out) _cc_clip_fallback "$@" ;;
+                -selection|-sel|-t|-target|-d|-display|-l|-loops) _cc_clip_skip=1 ;;
+                -*) ;;
+                *) _cc_clip_fallback "$@" ;;
             esac
         done
         _cc_clip_log "intercepting clipboard write (dual-write)"
@@ -504,4 +516,15 @@ esac
 
 func WlPasteShim(port int, realWlPastePath string) string {
 	return fmt.Sprintf(wlPasteShimTemplate, port, realWlPastePath)
+}
+
+// TemplateFingerprint identifies the shim templates this binary would install.
+//
+// It is derived from the template text itself rather than a hand-maintained
+// version constant, so it cannot be forgotten: any edit to any shim body
+// changes the fingerprint, and every host whose recorded fingerprint differs
+// gets the new script on its next connect.
+func TemplateFingerprint() string {
+	sum := sha256.Sum256([]byte(xclipShimTemplate + wlPasteShimTemplate + wlCopyShimTemplate))
+	return hex.EncodeToString(sum[:8])
 }

@@ -99,6 +99,10 @@ Remote:
   install            Install xclip/wl-paste shim
     --target         auto|xclip|wl-paste (default: auto)
     --path           Install directory (default: ~/.local/bin)
+    --adopt-foreign-shim
+                     If a file cc-clip did not write occupies the shim path,
+                     move it to <path>.cc-clip-real and fall back to it there
+                     instead of refusing. Nothing is deleted.
   uninstall          Remove shim
     --host           Also clean up remote: Claude hooks/wrapper + PATH marker
   paste              Fetch clipboard image and output path
@@ -147,6 +151,9 @@ Deploy (local -> remote):
     --no-hooks       Persistently disable Claude Code hook injection (Claude target only)
     --hooks          Re-enable Claude Code hook injection (Claude target only)
     --auto-recover   Recover from v0.7.0 wrapper corruption (mutex with --token-only)
+    --adopt-foreign-shim
+                     Let the remote install move a file it did not write aside
+                     (to <path>.cc-clip-real) instead of refusing
 
 Deployment targets (connect/setup; choose at most one selector):
     --claude         Claude Code: clipboard shim + claude-notify (default)
@@ -325,7 +332,9 @@ func cmdInstall() {
 		log.Fatalf("unsupported target: %s", targetStr)
 	}
 
-	result, err := shim.Install(target, installPath, port)
+	result, err := shim.InstallWithOptions(target, installPath, port, shim.InstallOptions{
+		AdoptForeign: hasFlag("adopt-foreign-shim"),
+	})
 	if err != nil {
 		log.Fatalf("install failed: %v", err)
 	}
@@ -334,6 +343,9 @@ func cmdInstall() {
 	fmt.Printf("  target:    %s\n", result.Target)
 	fmt.Printf("  shim:      %s\n", result.ShimPath)
 	fmt.Printf("  real bin:  %s\n", result.RealBinPath)
+	for _, note := range result.Notes {
+		fmt.Printf("  note:      %s\n", note)
+	}
 
 	ok, msg := shim.CheckPathPriority(result.InstallDir)
 	if ok {

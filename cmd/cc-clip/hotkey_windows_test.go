@@ -164,3 +164,93 @@ func TestSaveHotkeyConfigRejectsPasteConflicts(t *testing.T) {
 		t.Fatal("saveHotkeyConfig accepted ctrl+v, want rejection")
 	}
 }
+
+// TestSameHotkeySettingsIgnoresTrayOwnedFields pins what counts as a
+// configuration change. A running loop cannot reload, so a change the CLI
+// manages must be refused rather than written to disk where --status would
+// report a host the next screenshot never reaches.
+func TestSameHotkeySettingsIgnoresTrayOwnedFields(t *testing.T) {
+	base := hotkeyConfig{Host: "venus", RemoteDir: "~/uploads", DelayMS: 150, Hotkey: "alt+shift+v"}
+
+	enabled, disabled := true, false
+	withNotify := base
+	withNotify.Notifications = &enabled
+	other := base
+	other.Notifications = &disabled
+	if !sameHotkeySettings(withNotify, other) {
+		t.Error("the tray's notification toggle must not count as a CLI config change")
+	}
+
+	changedHost := base
+	changedHost.Host = "mars"
+	if sameHotkeySettings(base, changedHost) {
+		t.Error("a different host must count as a change")
+	}
+
+	changedRestore := base
+	changedRestore.NoRestore = true
+	if sameHotkeySettings(base, changedRestore) {
+		t.Error("a different --no-restore must count as a change")
+	}
+}
+
+// TestHotkeyChangeBlockedTreatsUnknownAsRunning pins the tri-state.
+//
+// The first version of this gate fired only on hotkeyProcessRunning, so an
+// unverifiable PID — what a non-elevated shell gets back for an elevated loop —
+// fell through, the new host was written to disk, and startHotkeyBackground
+// then refused to start anything. That reproduced the original defect exactly:
+// --status reporting one host while a live loop kept uploading to another.
+func TestHotkeyChangeBlockedTreatsUnknownAsRunning(t *testing.T) {
+	stored := hotkeyConfig{Host: "venus", RemoteDir: "~/uploads", DelayMS: 150, Hotkey: "alt+shift+v"}
+	changed := stored
+	changed.Host = "mars"
+
+	cases := []struct {
+		name      string
+		state     hotkeyProcessState
+		hasStored bool
+		cfg       hotkeyConfig
+		want      bool
+	}{
+		{"running with a changed host is refused", hotkeyProcessRunning, true, changed, true},
+		{"unverifiable pid with a changed host is refused", hotkeyProcessUnknown, true, changed, true},
+		{"running with identical settings is allowed", hotkeyProcessRunning, true, stored, false},
+		{"unverifiable pid with identical settings is allowed", hotkeyProcessUnknown, true, stored, false},
+		{"no live loop is always allowed", hotkeyProcessGone, true, changed, false},
+		{"a foreign pid is always allowed", hotkeyProcessOther, true, changed, false},
+		{"a live loop with no stored config is refused", hotkeyProcessRunning, false, changed, true},
+		{"an unverifiable pid with no stored config is refused", hotkeyProcessUnknown, false, changed, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hotkeyChangeBlocked(tc.state, tc.hasStored, tc.cfg, stored); got != tc.want {
+				t.Errorf("hotkeyChangeBlocked = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDescribeBlockedHotkeyChangeDoesNotOverclaim keeps the refusal message
+// honest about which of the two states it is reporting.
+func TestDescribeBlockedHotkeyChangeDoesNotOverclaim(t *testing.T) {
+	stored := hotkeyConfig{Host: "venus"}
+
+	unknown := describeBlockedHotkeyChange(4321, hotkeyProcessUnknown, "access is denied.", true, stored)
+	if !strings.Contains(unknown, "may still be running") {
+		t.Errorf("an unverifiable pid must not be reported as certainly running: %q", unknown)
+	}
+	if !strings.Contains(unknown, "access is denied.") {
+		t.Errorf("the refusal must say why the pid could not be verified: %q", unknown)
+	}
+
+	running := describeBlockedHotkeyChange(4321, hotkeyProcessRunning, "", true, stored)
+	if !strings.Contains(running, "already running") || !strings.Contains(running, "venus") {
+		t.Errorf("a verified loop must be named with its host: %q", running)
+	}
+
+	noStored := describeBlockedHotkeyChange(4321, hotkeyProcessRunning, "", false, hotkeyConfig{})
+	if !strings.Contains(noStored, "unknown host") {
+		t.Errorf("with no stored config the host must not be invented: %q", noStored)
+	}
+}

@@ -308,3 +308,75 @@ func TestIsAlwaysCritical(t *testing.T) {
 		})
 	}
 }
+
+// TestDedupSeparatesHosts pins the originating host into the identity. Two
+// remotes finishing a turn produce byte-identical text, and without the host in
+// the key the second host's notification was dropped as a repeat of the first.
+func TestDedupSeparatesHosts(t *testing.T) {
+	d := NewDeduper(time.Minute)
+	now := time.Now()
+
+	envFor := func(host string) NotifyEnvelope {
+		return NotifyEnvelope{
+			Kind:           KindGenericMessage,
+			Source:         "claude",
+			Host:           host,
+			GenericMessage: &GenericMessagePayload{Title: "Claude", Body: "Turn complete"},
+		}
+	}
+
+	if allowed, _ := d.AllowAt(envFor("host-a"), now); !allowed {
+		t.Fatal("first host must be delivered")
+	}
+	if allowed, _ := d.AllowAt(envFor("host-b"), now); !allowed {
+		t.Fatal("a second host's identical notification must not be suppressed")
+	}
+	if allowed, _ := d.AllowAt(envFor("host-a"), now); allowed {
+		t.Fatal("a genuine repeat from the same host must still be suppressed")
+	}
+}
+
+// TestDedupSeparatesSessionsOnOneHost pins the other half of the identity: two
+// concurrent agent sessions on the SAME host also produce byte-identical
+// turn-complete text, and the host alone does not tell them apart.
+func TestDedupSeparatesSessionsOnOneHost(t *testing.T) {
+	d := NewDeduper(time.Minute)
+	now := time.Now()
+
+	envFor := func(session string) NotifyEnvelope {
+		return NotifyEnvelope{
+			Kind:           KindToolAttention,
+			Source:         "claude_hook",
+			Host:           "venus",
+			ToolAttention:  &ToolAttentionPayload{SessionID: session, HookType: "stop"},
+			GenericMessage: &GenericMessagePayload{Title: "Claude", Body: "Turn complete"},
+		}
+	}
+
+	if allowed, _ := d.AllowAt(envFor("session-a"), now); !allowed {
+		t.Fatal("first session must be delivered")
+	}
+	if allowed, _ := d.AllowAt(envFor("session-b"), now); !allowed {
+		t.Fatal("a second session on the same host must not be suppressed")
+	}
+	if allowed, _ := d.AllowAt(envFor("session-a"), now); allowed {
+		t.Fatal("a genuine repeat from the same session must still be suppressed")
+	}
+}
+
+// TestClassifierCarriesSessionID keeps the dedup identity wired to the producer:
+// the session dimension is inert unless the classifier reads session_id off the
+// hook payload.
+func TestClassifierCarriesSessionID(t *testing.T) {
+	env := ClassifyHookPayload("stop", map[string]any{
+		"_cc_clip_host": "venus",
+		"session_id":    "abc123",
+		"stop_reason":   "end_turn",
+	})
+	if env == nil || env.ToolAttention == nil {
+		t.Fatal("expected a tool-attention envelope")
+	}
+	if env.ToolAttention.SessionID != "abc123" {
+		t.Fatalf("SessionID = %q, want abc123", env.ToolAttention.SessionID)
+	}
+}

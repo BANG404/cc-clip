@@ -27,13 +27,13 @@ export const CcClipNotifyPlugin = async ({ $ }) => ({
     // shifting across opencode versions).
     if (event.type !== "session.idle") return
     try {
-      // BunShell subprocess: pipe the JSON envelope on stdin so the Go runner
-      // parses it exactly like codex/agy. .nothrow()/.quiet() keep it silent.
-      const proc = $`+"`%s`"+`.quiet().nothrow()
-      const writer = proc.stdin.getWriter()
-      await writer.write(new TextEncoder().encode(JSON.stringify({ event })))
-      await writer.close()
-      await proc
+      // $ here is Bun Shell, not a child_process handle: it has no .stdin to
+      // write to, and reaching for one threw into the catch below, which is
+      // why an installed plugin notified nothing. Bun Shell feeds stdin the
+      // shell way instead: the < redirect accepts a TypedArray directly.
+      // .nothrow()/.quiet() keep it silent.
+      const payload = new TextEncoder().encode(JSON.stringify({ event }))
+      await $`+"`%s < ${payload}`"+`.quiet().nothrow()
     } catch (_) {
       /* fire-and-forget: a notify failure must never disrupt opencode */
     }

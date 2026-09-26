@@ -202,7 +202,7 @@ func TestRunClaudeNotifyFailSoftOnPostFailure(t *testing.T) {
 // propagate from runCodexNotify (3b-2 fail-soft).
 func TestRunCodexNotifyFailSoftOnParseError(t *testing.T) {
 	stdin := strings.NewReader(`{invalid`)
-	if err := runCodexNotify(18339, stdin); err != nil {
+	if err := runCodexNotify(18339, nil, stdin); err != nil {
 		t.Fatalf("runCodexNotify must be fail-soft on parse error, got %v", err)
 	}
 }
@@ -214,7 +214,7 @@ func TestRunCodexNotifyFailSoftOnPostFailure(t *testing.T) {
 	setTestHome(t, home) // empty => nonce file missing => POST fails
 
 	stdin := strings.NewReader(`{"last-assistant-message":"hi"}`)
-	if err := runCodexNotify(1, stdin); err != nil {
+	if err := runCodexNotify(1, nil, stdin); err != nil {
 		t.Fatalf("runCodexNotify must not propagate POST failure, got %v", err)
 	}
 }
@@ -441,5 +441,28 @@ func TestRunUnknownAdapter(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown plugin adapter") {
 		t.Fatalf("error = %q, want it to mention unknown plugin adapter", err.Error())
+	}
+}
+
+// TestRunCodexNotifyReadsArgvPayload pins the producer's actual calling
+// convention. Codex runs the configured `notify` program with the event JSON
+// appended as a trailing argument; the dispatcher only ever read stdin, so an
+// argv invocation exited 0 and posted nothing at all.
+func TestRunCodexNotifyReadsArgvPayload(t *testing.T) {
+	port, srv := newNotifyServerWithChannel(t)
+
+	payload := `{"last-assistant-message":"codex says hi"}`
+	// stdin is empty, exactly as Codex leaves it.
+	var stdout strings.Builder
+	if err := RunWithArgs(AdapterCodexNotify, port, []string{payload}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("RunWithArgs codex-notify failed: %v", err)
+	}
+
+	env := drainOne(t, srv.NotifyChannel())
+	if env.GenericMessage == nil {
+		t.Fatal("expected GenericMessage payload from the argv event JSON")
+	}
+	if env.GenericMessage.Body != "codex says hi" {
+		t.Fatalf("body = %q, want %q", env.GenericMessage.Body, "codex says hi")
 	}
 }

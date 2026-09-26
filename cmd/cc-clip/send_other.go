@@ -11,6 +11,6 @@ func defaultRemoteHost() (string, bool, error) {
 	return "", false, nil
 }
 
-func pasteRemotePath(remotePath, imagePath string, delay time.Duration, restoreClipboard bool) error {
+func pasteRemotePath(guard *focusGuard, remotePath, imagePath string, delay time.Duration, restoreClipboard bool) error {
 	return fmt.Errorf("--paste is only supported on Windows")
 }

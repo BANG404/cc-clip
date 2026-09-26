@@ -26,7 +26,7 @@ func decodeStopCommands(t *testing.T, doc []byte) []map[string]any {
 func TestMergeCursorHooksCreatesFile(t *testing.T) {
 	t.Parallel()
 
-	out, changed, err := mergeCursorHooks(nil)
+	out, changed, err := mergeCursorHooks(nil, defaultDaemonPort)
 	if err != nil {
 		t.Fatalf("mergeCursorHooks: %v", err)
 	}
@@ -48,8 +48,8 @@ func TestMergeCursorHooksCreatesFile(t *testing.T) {
 	if len(cmds) != 1 {
 		t.Fatalf("stop commands = %d, want 1", len(cmds))
 	}
-	if cmds[0]["command"] != cursorManagedHookCommand {
-		t.Errorf("command = %q, want %q", cmds[0]["command"], cursorManagedHookCommand)
+	if cmds[0]["command"] != cursorManagedHookCommand(defaultDaemonPort) {
+		t.Errorf("command = %q, want %q", cmds[0]["command"], cursorManagedHookCommand(defaultDaemonPort))
 	}
 }
 
@@ -62,11 +62,11 @@ func TestMergeCursorHooksCreatesFile(t *testing.T) {
 func TestMergeCursorHooksAbsolutePath(t *testing.T) {
 	t.Parallel()
 
-	if strings.Contains(cursorManagedHookCommand, " cc-clip ") {
-		t.Fatalf("hook command resolves cc-clip from PATH: %q", cursorManagedHookCommand)
+	if strings.Contains(cursorManagedHookCommand(defaultDaemonPort), " cc-clip ") {
+		t.Fatalf("hook command resolves cc-clip from PATH: %q", cursorManagedHookCommand(defaultDaemonPort))
 	}
-	if !strings.Contains(cursorManagedHookCommand, `"$HOME/.local/bin/cc-clip"`) {
-		t.Errorf("hook command must address the binary absolutely, got %q", cursorManagedHookCommand)
+	if !strings.Contains(cursorManagedHookCommand(defaultDaemonPort), `"$HOME/.local/bin/cc-clip"`) {
+		t.Errorf("hook command must address the binary absolutely, got %q", cursorManagedHookCommand(defaultDaemonPort))
 	}
 }
 
@@ -86,7 +86,7 @@ func TestMergeCursorHooksPreservesUserContent(t *testing.T) {
   }
 }`)
 
-	out, changed, err := mergeCursorHooks(existing)
+	out, changed, err := mergeCursorHooks(existing, defaultDaemonPort)
 	if err != nil {
 		t.Fatalf("mergeCursorHooks: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestMergeCursorHooksPreservesUserContent(t *testing.T) {
 	if cmds[0]["command"] != "./commit.sh" {
 		t.Errorf("user command lost or reordered: %v", cmds[0])
 	}
-	if cmds[1]["command"] != cursorManagedHookCommand {
+	if cmds[1]["command"] != cursorManagedHookCommand(defaultDaemonPort) {
 		t.Errorf("our command not appended: %v", cmds[1])
 	}
 }
@@ -124,11 +124,11 @@ func TestMergeCursorHooksPreservesUserContent(t *testing.T) {
 func TestMergeCursorHooksIdempotent(t *testing.T) {
 	t.Parallel()
 
-	first, changed, err := mergeCursorHooks(nil)
+	first, changed, err := mergeCursorHooks(nil, defaultDaemonPort)
 	if err != nil || !changed {
 		t.Fatalf("first merge: changed=%v err=%v", changed, err)
 	}
-	if _, changed, err := mergeCursorHooks(first); err != nil {
+	if _, changed, err := mergeCursorHooks(first, defaultDaemonPort); err != nil {
 		t.Fatalf("second merge: %v", err)
 	} else if changed {
 		t.Error("merging an already-current file must be a no-op")
@@ -145,7 +145,7 @@ func TestMergeCursorHooksReplacesStaleManagedCommand(t *testing.T) {
 	  {"command":"env CC_CLIP_MANAGED=1 cc-clip plugin run cursor-notify","timeout":5}
 	]}}`)
 
-	out, changed, err := mergeCursorHooks(existing)
+	out, changed, err := mergeCursorHooks(existing, defaultDaemonPort)
 	if err != nil {
 		t.Fatalf("mergeCursorHooks: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestMergeCursorHooksReplacesStaleManagedCommand(t *testing.T) {
 	if len(cmds) != 1 {
 		t.Fatalf("stop commands = %d, want 1 (replaced, not duplicated)", len(cmds))
 	}
-	if cmds[0]["command"] != cursorManagedHookCommand {
+	if cmds[0]["command"] != cursorManagedHookCommand(defaultDaemonPort) {
 		t.Errorf("command = %q, want the current one", cmds[0]["command"])
 	}
 }
@@ -167,7 +167,7 @@ func TestMergeCursorHooksReplacesStaleManagedCommand(t *testing.T) {
 func TestMergeCursorHooksRefusesUnparseableFile(t *testing.T) {
 	t.Parallel()
 
-	if _, _, err := mergeCursorHooks([]byte(`{"hooks": `)); err == nil {
+	if _, _, err := mergeCursorHooks([]byte(`{"hooks": `), defaultDaemonPort); err == nil {
 		t.Fatal("expected an error for malformed JSON, got nil")
 	}
 }
@@ -178,7 +178,7 @@ func TestRemoveCursorManagedHooks(t *testing.T) {
 	t.Parallel()
 
 	t.Run("keeps user commands", func(t *testing.T) {
-		merged, _, err := mergeCursorHooks([]byte(`{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}]}}`))
+		merged, _, err := mergeCursorHooks([]byte(`{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}]}}`), defaultDaemonPort)
 		if err != nil {
 			t.Fatalf("merge: %v", err)
 		}
@@ -193,7 +193,7 @@ func TestRemoveCursorManagedHooks(t *testing.T) {
 	})
 
 	t.Run("drops an emptied event", func(t *testing.T) {
-		merged, _, err := mergeCursorHooks(nil)
+		merged, _, err := mergeCursorHooks(nil, defaultDaemonPort)
 		if err != nil {
 			t.Fatalf("merge: %v", err)
 		}
@@ -250,4 +250,27 @@ func TestParseRemoteCursorHooksProbe(t *testing.T) {
 			t.Fatal("expected an error when sentinels are missing")
 		}
 	})
+}
+
+// TestCursorHookCarriesDeployPort pins the port into the hook command. Cursor
+// runs a hook with the system environment, not the remote login shell's, so a
+// host deployed on a non-default port posted its notifications to 18339.
+func TestCursorHookCarriesDeployPort(t *testing.T) {
+	merged, _, err := mergeCursorHooks(nil, 29999)
+	if err != nil {
+		t.Fatalf("mergeCursorHooks: %v", err)
+	}
+	if !strings.Contains(string(merged), "CC_CLIP_PORT=29999") {
+		t.Fatalf("hook must carry the deployment port:\n%s", merged)
+	}
+	if !strings.Contains(string(merged), cursorManagedHookOwnerPrefix) {
+		t.Fatalf("ownership marker must survive the port prefix:\n%s", merged)
+	}
+
+	// A hook written for another port is not current and must be rewritten.
+	if _, changed, err := mergeCursorHooks(merged, defaultDaemonPort); err != nil {
+		t.Fatalf("mergeCursorHooks: %v", err)
+	} else if !changed {
+		t.Fatal("a hook pinned to a different port must be rewritten, not kept")
+	}
 }

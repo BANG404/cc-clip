@@ -71,6 +71,30 @@ func (m *mockExecutor) Exec(cmd string) (string, error) {
 		return "", nil
 	}
 
+	// Handle sed -n '/start/,/end/p' for reading back an injected block
+	if strings.HasPrefix(cmd, "sed -n") {
+		rcFile := extractSedFile(cmd)
+		content := m.files[rcFile]
+		markerStart, markerEnd := pathMarkerStart, pathMarkerEnd
+		if strings.Contains(cmd, sedEscape(displayMarkerStart)) {
+			markerStart, markerEnd = displayMarkerStart, displayMarkerEnd
+		}
+		var out []string
+		inBlock := false
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, markerStart) {
+				inBlock = true
+			}
+			if inBlock {
+				out = append(out, line)
+			}
+			if inBlock && strings.Contains(line, markerEnd) {
+				break
+			}
+		}
+		return strings.Join(out, "\n"), nil
+	}
+
 	// Handle sed -i for removal
 	if strings.HasPrefix(cmd, "sed -i") {
 		rcFile := extractSedFile(cmd)

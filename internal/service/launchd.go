@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -150,4 +151,104 @@ func Uninstall() error {
 // Status checks if the launchd job is currently loaded/running.
 func Status() (bool, error) {
 	return launchctlList(plistLabel)
+}
+
+// InstalledPort reports the --port the installed plist starts the daemon on.
+//
+// `service install --port N` honours N, but every later re-registration read a
+// hardcoded 18339 instead: `cc-clip update` unloaded a service running on N and
+// reloaded it on 18339, which moved the daemon out from under every SSH tunnel
+// forwarding N. Callers that re-register a service must read the port back from
+// the plist they are about to replace.
+func InstalledPort() (int, bool) {
+	data, err := os.ReadFile(PlistPath())
+	if err != nil {
+		return 0, false
+	}
+	return parsePlistPort(string(data))
+}
+
+// parsePlistPort pulls the value that follows the "--port" argument out of the
+// plist's ProgramArguments array.
+//
+// The array is located first, and XML comments are removed before anything is
+// read. Scanning every <string> in the whole document meant a perfectly legal
+// comment that happened to mention an older port was read as configuration,
+// and the caller then MOVED the running service onto it — the exact failure
+// this function exists to prevent, arrived at from the other direction.
+func parsePlistPort(plist string) (int, bool) {
+	args, ok := programArgumentsArray(stripXMLComments(plist))
+	if !ok {
+		return 0, false
+	}
+	values := plistStringValues(args)
+	for i := 0; i+1 < len(values); i++ {
+		if values[i] == "--port" {
+			port, err := strconv.Atoi(values[i+1])
+			if err != nil || port <= 0 || port > 65535 {
+				return 0, false
+			}
+			return port, true
+		}
+	}
+	return 0, false
+}
+
+// stripXMLComments removes <!-- ... --> spans. An unterminated comment makes
+// the rest of the document unreadable, which is reported as "no port" rather
+// than guessed at.
+func stripXMLComments(doc string) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(doc, "<!--")
+		if start < 0 {
+			b.WriteString(doc)
+			return b.String()
+		}
+		b.WriteString(doc[:start])
+		rest := doc[start+len("<!--"):]
+		end := strings.Index(rest, "-->")
+		if end < 0 {
+			return b.String()
+		}
+		doc = rest[end+len("-->"):]
+	}
+}
+
+// programArgumentsArray returns the body of the <array> that follows the
+// ProgramArguments key.
+func programArgumentsArray(doc string) (string, bool) {
+	key := strings.Index(doc, "<key>ProgramArguments</key>")
+	if key < 0 {
+		return "", false
+	}
+	rest := doc[key:]
+	open := strings.Index(rest, "<array>")
+	if open < 0 {
+		return "", false
+	}
+	rest = rest[open+len("<array>"):]
+	close := strings.Index(rest, "</array>")
+	if close < 0 {
+		return "", false
+	}
+	return rest[:close], true
+}
+
+func plistStringValues(plist string) []string {
+	var out []string
+	rest := plist
+	for {
+		start := strings.Index(rest, "<string>")
+		if start < 0 {
+			return out
+		}
+		rest = rest[start+len("<string>"):]
+		end := strings.Index(rest, "</string>")
+		if end < 0 {
+			return out
+		}
+		out = append(out, rest[:end])
+		rest = rest[end+len("</string>"):]
+	}
 }

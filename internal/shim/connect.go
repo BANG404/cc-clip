@@ -39,7 +39,7 @@ func remoteExecArgs(host, cmdStr string) []string {
 // writeRemoteTokenArgs builds the ssh arg vector for WriteRemoteToken.
 func writeRemoteTokenArgs(host string) []string {
 	return sshHostArgs(noForwardPrefix, host,
-		WrapRemoteShell("mkdir -p ~/.cache/cc-clip && cat > ~/.cache/cc-clip/session.token && chmod 600 ~/.cache/cc-clip/session.token"))
+		WrapRemoteShell(remoteSecretWriteCommand("session.token")))
 }
 
 // DetectRemoteArch returns the remote system's GOARCH-compatible architecture string.

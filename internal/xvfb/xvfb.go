@@ -19,6 +19,9 @@ type RemoteExecutor interface {
 type State struct {
 	Display string // just the number, e.g. "42"
 	PID     int
+	// AuthFile is the X authority file the server was started with. Clients
+	// must set XAUTHORITY to it or the server will refuse them.
+	AuthFile string
 }
 
 // ParseDisplayFile parses the content of a display file written by Xvfb -displayfd.
@@ -99,15 +102,29 @@ func IsHealthy(session RemoteExecutor, stateDir string) (*State, bool) {
 		return nil, false
 	}
 
-	return &State{Display: display, PID: pid}, true
+	// An instance started before cc-clip set up X authorization is NOT
+	// reusable: it still accepts any local client, which is the whole reason
+	// the cookie exists.
+	//
+	// The check is a state marker this package writes when it starts a server
+	// under -auth, NOT a parse of the process argv. `ps -p` is not portable —
+	// busybox does not accept it — and an argv probe that errors on such a
+	// host reports every healthy instance as unhealthy, restarting Xvfb on
+	// every connect. The marker lives and dies with xvfb.pid, so it is exactly
+	// as trustworthy as the PID record already relied on here.
+	if _, err := session.Exec(fmt.Sprintf("test -s %s", AuthMarkerPath(stateDir))); err != nil {
+		return nil, false
+	}
+
+	return &State{Display: display, PID: pid, AuthFile: AuthFilePath(stateDir)}, true
 }
 
 // CleanStale removes stale state files (pid, display, log) from stateDir.
 // It is idempotent: missing files do not cause errors.
 func CleanStale(session RemoteExecutor, stateDir string) error {
 	_, err := session.Exec(fmt.Sprintf(
-		"rm -f %s/xvfb.pid %s/display %s/xvfb.log",
-		stateDir, stateDir, stateDir,
+		"rm -f %s/xvfb.pid %s/display %s/xvfb.log %s",
+		stateDir, stateDir, stateDir, AuthMarkerPath(stateDir),
 	))
 	if err != nil {
 		return fmt.Errorf("failed to clean stale Xvfb state in %s: %w", stateDir, err)
@@ -199,30 +216,43 @@ func StartRemote(session RemoteExecutor, stateDir string) (*State, error) {
 		return state, nil
 	}
 
-	// Step 3: Clean stale state
-	if err := CleanStale(session, stateDir); err != nil {
+	// Step 3: Retire whatever is there.
+	//
+	// StopRemote, not CleanStale: an instance can be alive and simply not
+	// reusable — the commonest case being one started before X authorization
+	// existed. Deleting its PID file and starting a second server left the
+	// FIRST one running, still accepting any local client, and now
+	// unreachable by --force or uninstall because both read that PID file.
+	// The security fix would have been undone by its own restart path.
+	if err := StopRemote(session, stateDir); err != nil {
+		return nil, fmt.Errorf("failed to retire the existing Xvfb before restarting it: %w", err)
+	}
+
+	// Step 4: Make sure an authorization cookie exists before the server that
+	// has to honour it. -listen tcp without -auth left the display open to
+	// every other account on the remote (see EnsureRemoteCookie).
+	authFile, err := EnsureRemoteCookie(session, stateDir)
+	if err != nil {
 		return nil, err
 	}
 
-	// Step 4: Start Xvfb via nohup + -displayfd
-	startScript := fmt.Sprintf(`mkdir -p %s
-rm -f %s/display
-nohup Xvfb -displayfd 1 -screen 0 1x1x24 -listen tcp \
-  > %s/display \
-  2> %s/xvfb.log \
+	// Step 5: Start Xvfb via nohup + -displayfd
+	startScript := fmt.Sprintf(`mkdir -p %[1]s
+rm -f %[1]s/display
+nohup Xvfb -displayfd 1 -screen 0 1x1x24 -listen tcp -auth %[2]s \
+  > %[1]s/display \
+  2> %[1]s/xvfb.log \
   < /dev/null &
-echo $! > %s/xvfb.pid
+echo $! > %[1]s/xvfb.pid
+printf '%%s\n' %[2]s > %[3]s
 for i in $(seq 1 30); do
-  [ -s %s/display ] && break
+  [ -s %[1]s/display ] && break
   sleep 0.2
 done
-cat %s/display`,
+cat %[1]s/display`,
 		stateDir,
-		stateDir,
-		stateDir, stateDir,
-		stateDir,
-		stateDir,
-		stateDir,
+		authFile,
+		AuthMarkerPath(stateDir),
 	)
 
 	displayOut, err := session.Exec(startScript)
@@ -230,7 +260,7 @@ cat %s/display`,
 		return nil, fmt.Errorf("failed to start Xvfb: %w", err)
 	}
 
-	// Step 5: Parse the display output
+	// Step 6: Parse the display output
 	display, err := ParseDisplayFile(displayOut)
 	if err != nil {
 		// Surface Xvfb's own log so an empty/garbled display is diagnosable
@@ -252,7 +282,7 @@ cat %s/display`,
 		return nil, fmt.Errorf("invalid Xvfb PID %q: %w", pidStr, err)
 	}
 
-	// Step 6: Verify socket exists (with brief retry)
+	// Step 7: Verify socket exists (with brief retry)
 	socketPath := SocketPath(display)
 	var socketErr error
 	for i := 0; i < 5; i++ {
@@ -267,7 +297,7 @@ cat %s/display`,
 		return nil, fmt.Errorf("xvfb socket %s not found after startup", socketPath)
 	}
 
-	return &State{Display: display, PID: pid}, nil
+	return &State{Display: display, PID: pid, AuthFile: authFile}, nil
 }
 
 // StopRemote stops a previously started Xvfb instance on the remote host.

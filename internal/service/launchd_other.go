@@ -23,3 +23,8 @@ func Uninstall() error {
 func Status() (bool, error) {
 	return false, fmt.Errorf("launchd service is only supported on macOS")
 }
+
+// InstalledPort is not supported on non-darwin platforms.
+func InstalledPort() (int, bool) {
+	return 0, false
+}

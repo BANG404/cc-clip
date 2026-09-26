@@ -34,7 +34,19 @@ func EnsureSSHConfig(host string, port int) ([]SSHConfigChange, error) {
 	return ensureSSHConfigAt(filepath.Join(sshDir, "config"), host, port)
 }
 
-func ensureSSHConfigAt(configPath string, host string, port int) ([]SSHConfigChange, error) {
+// sshHostPattern turns an ssh destination into the pattern a Host block has to
+// carry. ssh matches Host patterns against the hostname alone — the user part
+// of user@host is consumed while parsing the destination — so a literal
+// "Host user@venus" block matches nothing and its RemoteForward never applies.
+func sshHostPattern(destination string) string {
+	if at := strings.LastIndex(destination, "@"); at >= 0 && at+1 < len(destination) {
+		return destination[at+1:]
+	}
+	return destination
+}
+
+func ensureSSHConfigAt(configPath string, destination string, port int) ([]SSHConfigChange, error) {
+	host := sshHostPattern(destination)
 	content, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("cannot read %s: %w", configPath, err)
@@ -45,6 +57,16 @@ func ensureSSHConfigAt(configPath string, host string, port int) ([]SSHConfigCha
 	rfValue := fmt.Sprintf("%d 127.0.0.1:%d", port, port)
 	var changes []SSHConfigChange
 	modified := false
+
+	// Where our directives will end up, so we can look at everything OpenSSH
+	// reads before them.
+	scopeCutoff := len(lines)
+	if block != nil {
+		scopeCutoff = block.startLine
+	} else if star := findHostStarLine(lines); star >= 0 {
+		scopeCutoff = star
+	}
+	changes = append(changes, scopeWarnings(lines, scopeCutoff)...)
 
 	if block == nil {
 		newBlock := []string{
@@ -81,13 +103,35 @@ func ensureSSHConfigAt(configPath string, host string, port int) ([]SSHConfigCha
 		}
 		for _, d := range directives {
 			key := strings.ToLower(d.key)
-			hasDirective := block.hasDirective(key, d.value)
 			if key == "remoteforward" {
-				hasDirective = block.hasRemoteForward(port)
+				// Several RemoteForward lines coexist; every one of them
+				// applies, so a missing forward is genuinely just an append.
+				if block.hasRemoteForward(port) {
+					changes = append(changes, SSHConfigChange{"ok", fmt.Sprintf("%s %s", d.key, d.value)})
+					continue
+				}
+				line := fmt.Sprintf("    %s %s", d.key, d.value)
+				lines = insertDirectiveInBlock(lines, block, line)
+				block.endLine++
+				changes = append(changes, SSHConfigChange{"added", fmt.Sprintf("%s %s", d.key, d.value)})
+				modified = true
+				continue
 			}
-			if hasDirective {
+
+			// ControlMaster and ControlPath are single-valued and OpenSSH keeps
+			// the FIRST value it obtains. Appending "ControlMaster no" below an
+			// existing "ControlMaster auto" therefore changed nothing: the
+			// pre-existing master was still reused and the RemoteForward still
+			// silently failed. Rewrite the first occurrence instead.
+			existing, at, found := block.firstDirective(key)
+			switch {
+			case found && normalizeSSHDirectiveValue(existing) == normalizeSSHDirectiveValue(d.value):
 				changes = append(changes, SSHConfigChange{"ok", fmt.Sprintf("%s %s", d.key, d.value)})
-			} else {
+			case found:
+				lines[at] = fmt.Sprintf("%s%s %s", leadingWhitespace(lines[at]), d.key, d.value)
+				changes = append(changes, SSHConfigChange{"updated", fmt.Sprintf("%s %s (was %s)", d.key, d.value, existing)})
+				modified = true
+			default:
 				line := fmt.Sprintf("    %s %s", d.key, d.value)
 				lines = insertDirectiveInBlock(lines, block, line)
 				block.endLine++
@@ -126,16 +170,25 @@ type sshBlock struct {
 type sshDirective struct {
 	key   string // lowercase
 	value string
+	line  int // index into the config's line slice
 }
 
-func (b *sshBlock) hasDirective(key, value string) bool {
-	want := normalizeSSHDirectiveValue(value)
+// firstDirective returns the value and line index of the first occurrence of
+// key in the block — the one OpenSSH actually honours for single-valued
+// directives.
+func (b *sshBlock) firstDirective(key string) (string, int, bool) {
 	for _, d := range b.directives {
-		if d.key == key && normalizeSSHDirectiveValue(d.value) == want {
-			return true
+		if d.key == key {
+			return d.value, d.line, true
 		}
 	}
-	return false
+	return "", 0, false
+}
+
+// leadingWhitespace returns the indentation of a config line so a rewritten
+// directive keeps the surrounding file's style.
+func leadingWhitespace(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 }
 
 func normalizeSSHDirectiveValue(value string) string {
@@ -180,7 +233,7 @@ func findHostBlock(lines []string, host string) *sshBlock {
 			block = &sshBlock{startLine: i}
 			continue
 		}
-		if block != nil && isAnyHostLine(trimmed) {
+		if block != nil && isBlockStart(trimmed) {
 			block.endLine = i
 			return block
 		}
@@ -190,6 +243,7 @@ func findHostBlock(lines []string, host string) *sshBlock {
 				block.directives = append(block.directives, sshDirective{
 					key:   strings.ToLower(key),
 					value: val,
+					line:  i,
 				})
 			}
 		}
@@ -201,10 +255,11 @@ func findHostBlock(lines []string, host string) *sshBlock {
 }
 
 func matchesHost(trimmed, host string) bool {
-	if !isAnyHostLine(trimmed) {
+	key, value := parseSSHDirective(trimmed)
+	if !strings.EqualFold(key, "Host") {
 		return false
 	}
-	for _, f := range strings.Fields(trimmed)[1:] {
+	for _, f := range strings.Fields(value) {
 		if f == host {
 			return true
 		}
@@ -212,8 +267,16 @@ func matchesHost(trimmed, host string) bool {
 	return false
 }
 
-func isAnyHostLine(trimmed string) bool {
-	return strings.HasPrefix(trimmed, "Host ") || strings.HasPrefix(trimmed, "Host\t")
+// isBlockStart reports whether a line opens a new configuration scope.
+//
+// BOTH Host and Match do. Treating only Host as a boundary let a Host block
+// run on through a following Match block, so cc-clip rewrote ControlMaster and
+// ControlPath belonging to OTHER connections and appended its RemoteForward
+// into that foreign scope — while the targeted Host block received nothing and
+// all three edits were reported as successful.
+func isBlockStart(trimmed string) bool {
+	key, _ := parseSSHDirective(trimmed)
+	return strings.EqualFold(key, "Host") || strings.EqualFold(key, "Match")
 }
 
 func findHostStarLine(lines []string) int {
@@ -225,18 +288,25 @@ func findHostStarLine(lines []string) int {
 	return -1
 }
 
+// parseSSHDirective splits one config line into keyword and arguments.
+//
+// ssh_config separates the two by whitespace or by exactly one "=", so a
+// TAB-separated directive is as valid as a space-separated one. Splitting on
+// the literal " " alone made "ControlMaster\tauto" parse as a single opaque
+// keyword, so the conflict check never saw it and appended a second
+// ControlMaster that OpenSSH then ignored.
 func parseSSHDirective(line string) (string, string) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 		return "", ""
 	}
-	// Handle both "Key Value" and "Key=Value"
-	trimmed = strings.Replace(trimmed, "=", " ", 1)
-	parts := strings.SplitN(trimmed, " ", 2)
-	if len(parts) < 2 {
-		return parts[0], ""
+	i := strings.IndexAny(trimmed, " \t=")
+	if i < 0 {
+		return trimmed, ""
 	}
-	return parts[0], strings.TrimSpace(parts[1])
+	key := trimmed[:i]
+	value := strings.TrimSpace(strings.TrimLeft(trimmed[i:], " \t="))
+	return key, value
 }
 
 func insertDirectiveInBlock(lines []string, block *sshBlock, directive string) []string {
@@ -249,4 +319,40 @@ func insertDirectiveInBlock(lines []string, block *sshBlock, directive string) [
 	result = append(result, directive)
 	result = append(result, lines[insertAt:]...)
 	return result
+}
+
+// scopeWarnings reports anything ABOVE our directives that can win the
+// first-obtained-value race, so cc-clip never claims to have fixed an
+// effective configuration it cannot actually see.
+//
+// Two cases matter and neither is resolvable from this file alone: an Include
+// pulls in directives from files this code does not read, and a Host/Match
+// block that OpenSSH reaches first can already have set ControlMaster or
+// ControlPath. Reporting them as warnings — rather than editing another
+// scope, or staying silent — keeps the safe-to-revert contract while telling
+// the user exactly what to verify.
+func scopeWarnings(lines []string, cutoff int) []SSHConfigChange {
+	var out []SSHConfigChange
+	sawInclude := false
+	sawConflict := false
+
+	for i := 0; i < cutoff && i < len(lines); i++ {
+		key, _ := parseSSHDirective(strings.TrimSpace(lines[i]))
+		switch {
+		case strings.EqualFold(key, "Include"):
+			sawInclude = true
+		case strings.EqualFold(key, "ControlMaster"), strings.EqualFold(key, "ControlPath"):
+			sawConflict = true
+		}
+	}
+
+	if sawInclude {
+		out = append(out, SSHConfigChange{"warning",
+			"an Include appears before this host; cc-clip cannot see what it sets. Verify with: ssh -G <host> | grep -i control"})
+	}
+	if sawConflict {
+		out = append(out, SSHConfigChange{"warning",
+			"an earlier Host/Match block already sets ControlMaster or ControlPath and OpenSSH keeps the first value it obtains. Verify with: ssh -G <host> | grep -i control"})
+	}
+	return out
 }

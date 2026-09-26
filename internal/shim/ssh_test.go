@@ -2,7 +2,9 @@ package shim
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -849,4 +851,64 @@ func readTestCodexConfig(t *testing.T, home string) string {
 		t.Fatalf("failed to read test config: %v", err)
 	}
 	return string(data)
+}
+
+// TestRemoteSecretWriteReplacesTheInode runs the credential write against a
+// real file that an earlier reader still holds open. Truncating in place let
+// that descriptor read every later secret; a rename gives it nothing new.
+func TestRemoteSecretWriteReplacesTheInode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the write is a remote POSIX shell command")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	home := t.TempDir()
+	dir := filepath.Join(home, ".cache", "cc-clip")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session.token")
+	if err := os.WriteFile(path, []byte("old-secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stale.Close()
+
+	cmd := exec.Command(bash, "-c", remoteSecretWriteCommand("session.token"))
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Stdin = strings.NewReader("new-secret\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write failed: %v: %s", err, out)
+	}
+
+	leaked, err := io.ReadAll(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(leaked), "new-secret") {
+		t.Fatal("a descriptor opened before the write can read the new secret")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "new-secret\n" {
+		t.Fatalf("stored secret = %q, %v", got, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode = %o, want 600", perm)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("temp file left behind: %v", entries)
+	}
 }

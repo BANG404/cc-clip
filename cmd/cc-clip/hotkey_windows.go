@@ -130,6 +130,22 @@ func cmdHotkey() {
 		log.Fatalf("failed to parse hotkey: %v", err)
 	}
 	cfg.Hotkey = binding.String()
+
+	// A running loop holds its configuration in memory and has no reload
+	// channel, so saving a new host here left `--status` reporting one host
+	// while the next screenshot still went to the old one. Refuse the change
+	// rather than record one that is not in effect.
+	if !*runLoop {
+		pid, state, reason := hotkeyProcessPID()
+		if hotkeyChangeBlocked(state, hasStoredCfg, cfg, storedCfg) {
+			log.Fatalf("hotkey: %s\n"+
+				"A loop cannot pick up configuration changes, so nothing was written.\n"+
+				"Stop it first, then re-run this command:\n"+
+				"  cc-clip hotkey --stop",
+				describeBlockedHotkeyChange(pid, state, reason, hasStoredCfg, storedCfg))
+		}
+	}
+
 	if err := saveHotkeyConfig(cfg); err != nil {
 		log.Fatalf("failed to save hotkey config: %v", err)
 	}
@@ -230,13 +246,16 @@ func runHotkeyLoop(cfg hotkeyConfig) {
 		log.Printf("hotkey: tray creation failed (continuing without tray): %v", err)
 	}
 
+	// The message-only window exists as soon as newTray returns; only the
+	// tray ICON depends on show(). Zeroing trayHwnd when show() failed routed
+	// WM_HOTKEY to the thread queue while the loop below still keyed its
+	// thread-message fallback off `tray == nil`, so the hotkey went nowhere.
 	var trayHwnd uintptr
 	if tray != nil {
+		trayHwnd = tray.hwnd
+		defer tray.remove()
 		if err := tray.show(); err != nil {
-			log.Printf("hotkey: tray show failed: %v", err)
-		} else {
-			trayHwnd = tray.hwnd
-			defer tray.remove()
+			log.Printf("hotkey: tray show failed (continuing without the tray icon): %v", err)
 		}
 	}
 
@@ -267,10 +286,10 @@ func runHotkeyLoop(cfg hotkeyConfig) {
 			return
 		}
 
-		// When tray is absent (trayHwnd == 0), WM_HOTKEY is posted to the
-		// thread message queue and DispatchMessage won't route it anywhere.
-		// Handle it explicitly here so the hotkey works in tray-less mode.
-		if m.message == wmHotkey && tray == nil {
+		// With no window (trayHwnd == 0), WM_HOTKEY is posted to the thread
+		// message queue and DispatchMessage won't route it anywhere. Handle it
+		// explicitly here so the hotkey works in window-less mode.
+		if m.message == wmHotkey && trayHwnd == 0 {
 			if !hotkeyRunning.Swap(true) {
 				go func() {
 					defer hotkeyRunning.Store(false)
@@ -292,9 +311,23 @@ func runHotkeyLoop(cfg hotkeyConfig) {
 func handleHotkeyPress(cfg hotkeyConfig, binding hotkeyBinding) error {
 	log.Printf("hotkey: %s pressed", binding.String())
 
+	// Pin the window the user aimed at FIRST, before anything else this
+	// function does. Capturing after the upload let a window switch during the
+	// upload make the new window the "correct" target; capturing after the
+	// balloon left a smaller window with the same shape, because showBalloon
+	// crosses into Win32 and can yield.
+	guard, err := newFocusGuard(systemFocusProbe)
+
 	tray := globalTray
 	if tray != nil {
-		tray.showBalloon("cc-clip", "Uploading clipboard image...", niifInfo)
+		if err != nil {
+			tray.showBalloon("cc-clip", "Paste aborted: "+err.Error(), niifWarning)
+		} else {
+			tray.showBalloon("cc-clip", "Uploading clipboard image...", niifInfo)
+		}
+	}
+	if err != nil {
+		return err
 	}
 
 	result, err := uploadImage(cfg.Host, cfg.RemoteDir, "")
@@ -317,7 +350,7 @@ func handleHotkeyPress(cfg hotkeyConfig, binding hotkeyBinding) error {
 	log.Printf("hotkey: uploaded %s", result.RemotePath)
 
 	delay := time.Duration(cfg.DelayMS) * time.Millisecond
-	if err := pasteRemotePath(result.RemotePath, result.LocalImagePath, delay, !cfg.NoRestore); err != nil {
+	if err := pasteRemotePath(guard, result.RemotePath, result.LocalImagePath, delay, !cfg.NoRestore); err != nil {
 		if tray != nil {
 			tray.showBalloon("cc-clip", "Paste failed: "+err.Error(), niifError)
 		}
@@ -643,4 +676,53 @@ func parseHotkeyKey(token string) (uint32, string, error) {
 
 func (h hotkeyBinding) String() string {
 	return h.display
+}
+
+// sameHotkeySettings compares only the fields the hotkey CLI manages. The
+// tray's notification toggle is deliberately excluded: it is owned by the
+// running loop, not by these flags.
+func sameHotkeySettings(a, b hotkeyConfig) bool {
+	return a.Host == b.Host &&
+		a.RemoteDir == b.RemoteDir &&
+		a.DelayMS == b.DelayMS &&
+		a.Hotkey == b.Hotkey &&
+		a.NoRestore == b.NoRestore
+}
+
+// hotkeyChangeBlocked reports whether a configuration change must be refused
+// because a loop that cannot reload it may still be running.
+//
+// hotkeyProcessUnknown counts the same as running. That is the whole point:
+// Unknown means OpenProcess failed with something other than "no such process"
+// — an access-denied answer, which is exactly what a non-elevated shell gets
+// when the loop was started elevated. Every other consumer in this file
+// already treats Unknown as "may be running and must not be overridden"
+// (startHotkeyBackground, stopHotkeyProcess, hotkeyStopIfStale,
+// printHotkeyStatus). A gate that quietly downgrades it to "not running" is
+// the one that fails open, and it fails open on the exact path the Windows
+// quickstart tells users to take when a paste misbehaves.
+//
+// With no stored config there is nothing to compare against, so a live loop's
+// settings are unverifiable and any change is refused rather than guessed at.
+func hotkeyChangeBlocked(state hotkeyProcessState, hasStored bool, cfg, stored hotkeyConfig) bool {
+	if state != hotkeyProcessRunning && state != hotkeyProcessUnknown {
+		return false
+	}
+	if !hasStored {
+		return true
+	}
+	return !sameHotkeySettings(cfg, stored)
+}
+
+// describeBlockedHotkeyChange explains WHICH loop is in the way, without
+// claiming more certainty than hotkeyProcessPID actually has.
+func describeBlockedHotkeyChange(pid int, state hotkeyProcessState, reason string, hasStored bool, stored hotkeyConfig) string {
+	host := "an unknown host"
+	if hasStored && stored.Host != "" {
+		host = stored.Host
+	}
+	if state == hotkeyProcessUnknown {
+		return fmt.Sprintf("PID %d is recorded and could not be verified (%s), so a loop for %s may still be running.", pid, reason, host)
+	}
+	return fmt.Sprintf("a loop is already running (PID %d) for host %s.", pid, host)
 }

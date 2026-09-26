@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Adapter names dispatched by Run. The Antigravity adapter's user-facing id is
@@ -16,15 +17,23 @@ const (
 	AdapterCursorNotify      = "cursor-notify"   // MUST equal shim.AdapterCursorNotify
 )
 
-// Run dispatches to the named adapter handler. stdin/stdout are injected for
-// testability. port comes from the caller (the cmd layer resolves it from
-// getPort()).
+// Run dispatches to the named adapter handler with no adapter arguments.
+// stdin/stdout are injected for testability. port comes from the caller (the
+// cmd layer resolves it from getPort()).
 func Run(name string, port int, stdin io.Reader, stdout io.Writer) error {
+	return RunWithArgs(name, port, nil, stdin, stdout)
+}
+
+// RunWithArgs is Run plus the arguments the producer appended after the
+// adapter name. Only Codex uses them: its notify contract is to run the
+// configured program with the event JSON as a trailing argv element, not on
+// stdin, so an argv-only invocation posted nothing at all.
+func RunWithArgs(name string, port int, args []string, stdin io.Reader, stdout io.Writer) error {
 	switch name {
 	case AdapterClaudeNotify:
 		return runClaudeNotify(port, stdin)
 	case AdapterCodexNotify:
-		return runCodexNotify(port, stdin)
+		return runCodexNotify(port, args, stdin)
 	case AdapterAntigravityNotify:
 		return runAntigravityNotify(port, stdin, stdout)
 	case AdapterOpencodeNotify:
@@ -50,23 +59,44 @@ func runClaudeNotify(port int, stdin io.Reader) error {
 	return nil
 }
 
-// runCodexNotify reads the Codex notify JSON from stdin, parses it into a
-// generic message, and posts it. This reproduces cmdNotify's
-// --from-codex-stdin parse+post core. It is fail-soft: a read error, parse
-// error, or POST failure must NOT propagate, since codex hook contexts require
-// exit 0 (mirrors antigravity's non-blocking posture but without the
-// decision-JSON stdout that codex hooks do not expect).
-func runCodexNotify(port int, stdin io.Reader) error {
-	b, err := io.ReadAll(stdin)
-	if err != nil {
+// runCodexNotify parses the Codex notify JSON into a generic message and posts
+// it. It is fail-soft: a read error, parse error, or POST failure must NOT
+// propagate, since codex hook contexts require exit 0 (mirrors antigravity's
+// non-blocking posture but without the decision-JSON stdout that codex hooks
+// do not expect).
+//
+// The payload arrives as a trailing argv element: Codex runs the configured
+// `notify` program with the event JSON appended as one more argument. stdin
+// stays supported because a hand-written argv-to-stdin wrapper is a documented
+// way to drive this adapter, and because every other adapter here reads stdin.
+func runCodexNotify(port int, args []string, stdin io.Reader) error {
+	payload, ok := codexPayload(args, stdin)
+	if !ok {
 		return nil
 	}
-	parsed, perr := parseCodexNotifyPayload(string(b))
+	parsed, perr := parseCodexNotifyPayload(payload)
 	if perr != nil {
 		return nil // fail-soft: invalid payload must not block the agent
 	}
 	_ = PostNotification(port, parsed)
 	return nil
+}
+
+// codexPayload picks the notify JSON out of the trailing arguments, falling
+// back to stdin when none of them carries one. Codex appends exactly one JSON
+// argument, but the scan is positional-agnostic so an extra fixed argument in
+// the user's own `notify` array does not hide the payload.
+func codexPayload(args []string, stdin io.Reader) (string, bool) {
+	for i := len(args) - 1; i >= 0; i-- {
+		if strings.HasPrefix(strings.TrimSpace(args[i]), "{") {
+			return args[i], true
+		}
+	}
+	b, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 // runAntigravityNotify parses stdin as an Antigravity Stop payload

@@ -104,11 +104,16 @@ func cmdUpdate() {
 	// forgotten stray daemon) holds port 18339, so service install's new
 	// plist crash-loops, `cc-clip connect` still sees "a daemon" and syncs
 	// the wrong token to remotes.
-	if conflict, err := detectDaemonConflict(updateDaemonPort, selfPath); err != nil {
+	// Read the port off the plist we are about to replace. Re-registering the
+	// service on the hardcoded default moved the daemon off the port every
+	// existing SSH tunnel forwards, and the conflict check below would have
+	// been inspecting the wrong port too.
+	servicePort := installedServicePort()
+	if conflict, err := detectDaemonConflict(servicePort, selfPath); err != nil {
 		fmt.Printf("warning: could not detect port conflicts: %v\n", err)
 	} else if conflict != "" {
 		if !opts.force {
-			log.Fatalf("conflict on :%d — %s\nresolve it before updating (stop / unload the other daemon), or rerun with --force.", updateDaemonPort, conflict)
+			log.Fatalf("conflict on :%d — %s\nresolve it before updating (stop / unload the other daemon), or rerun with --force.", servicePort, conflict)
 		}
 		fmt.Printf("warning: ignoring conflict because --force was given: %s\n", conflict)
 	}
@@ -178,8 +183,8 @@ func cmdUpdate() {
 	// launchd reloads the job pointing at the new binary. Failure here is
 	// treated the same as any other post-install failure: roll back before
 	// returning.
-	if err := reinstallMacOSService(selfPath, serviceWasRunning); err != nil {
-		rollbackAfterInstall(selfPath, backup, serviceWasRunning)
+	if err := reinstallMacOSService(selfPath, serviceWasRunning, servicePort); err != nil {
+		rollbackAfterInstall(selfPath, backup, serviceWasRunning, servicePort)
 		log.Fatalf("service restart failed (%v); rolled back to previous version.", err)
 	}
 
@@ -189,11 +194,11 @@ func cmdUpdate() {
 	// macOS, broken linked library, etc.).
 	installedVersion, verifyErr := runVersionCommand(selfPath)
 	if verifyErr != nil {
-		rollbackAfterInstall(selfPath, backup, serviceWasRunning)
+		rollbackAfterInstall(selfPath, backup, serviceWasRunning, servicePort)
 		log.Fatalf("post-install: installed binary failed to run (%v); rolled back to previous version.\ncheck %s for the archive you were trying to install.", verifyErr, backup)
 	}
 	if !stagedVersionMatches(installedVersion, target) {
-		rollbackAfterInstall(selfPath, backup, serviceWasRunning)
+		rollbackAfterInstall(selfPath, backup, serviceWasRunning, servicePort)
 		log.Fatalf("post-install: installed binary reports %q, expected %s; rolled back.", installedVersion, target)
 	}
 	fmt.Printf("verified binary: %s\n", installedVersion)
@@ -205,11 +210,11 @@ func cmdUpdate() {
 	// what happens after `--force` past a conflict, or if `service install`
 	// silently succeeded but launchd's job crash-looped.
 	if serviceWasRunning {
-		if err := verifyRunningDaemon(selfPath, updateDaemonPort); err != nil {
-			rollbackAfterInstall(selfPath, backup, serviceWasRunning)
-			log.Fatalf("post-install: daemon verification failed (%v); rolled back to previous version.\nresolve the stray process on :%d (see `docs/upgrading.md`) and try again.", err, updateDaemonPort)
+		if err := verifyRunningDaemon(selfPath, servicePort); err != nil {
+			rollbackAfterInstall(selfPath, backup, serviceWasRunning, servicePort)
+			log.Fatalf("post-install: daemon verification failed (%v); rolled back to previous version.\nresolve the stray process on :%d (see `docs/upgrading.md`) and try again.", err, servicePort)
 		}
-		fmt.Println("verified daemon: responding on :" + strconv.Itoa(updateDaemonPort) + " from the new binary")
+		fmt.Println("verified daemon: responding on :" + strconv.Itoa(servicePort) + " from the new binary")
 	}
 
 	_ = os.Remove(backup)
@@ -253,17 +258,27 @@ func describeServiceState(wasRunning bool) string {
 // reinstallMacOSService re-registers the launchd plist against binaryPath,
 // but only if a service was running before the update. Returns a non-nil
 // error so the caller can rollback; the function does not panic or exit.
-func reinstallMacOSService(binaryPath string, serviceWasRunning bool) error {
+func reinstallMacOSService(binaryPath string, serviceWasRunning bool, port int) error {
 	if runtime.GOOS != "darwin" || !serviceWasRunning {
 		return nil
 	}
 	if err := service.Uninstall(); err != nil {
 		return fmt.Errorf("service uninstall: %w", err)
 	}
-	if err := service.Install(binaryPath, updateDaemonPort); err != nil {
+	if err := service.Install(binaryPath, port); err != nil {
 		return fmt.Errorf("service install: %w", err)
 	}
 	return nil
+}
+
+// installedServicePort is the port the currently installed service runs on,
+// falling back to the default when no service is installed or the plist cannot
+// be read.
+func installedServicePort() int {
+	if port, ok := service.InstalledPort(); ok {
+		return port
+	}
+	return updateDaemonPort
 }
 
 // verifyRunningDaemon polls /health until 200 OK, then confirms that the
@@ -321,14 +336,14 @@ func verifyRunningDaemon(expectedPath string, port int) error {
 // operation fails, we still try the remaining ones because the user is
 // already in a broken state and we want to leave them as close to the
 // pre-update world as possible.
-func rollbackAfterInstall(selfPath, backup string, serviceWasRunning bool) {
+func rollbackAfterInstall(selfPath, backup string, serviceWasRunning bool, port int) {
 	_ = os.Remove(selfPath)
 	_ = os.Rename(backup, selfPath)
 	if runtime.GOOS != "darwin" || !serviceWasRunning {
 		return
 	}
 	_ = service.Uninstall()
-	_ = service.Install(selfPath, updateDaemonPort)
+	_ = service.Install(selfPath, port)
 }
 
 func parseUpdateFlags(args []string) updateOptions {

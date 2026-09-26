@@ -19,9 +19,21 @@ func cmdServe() {
 
 	tm := token.NewManager(ttl)
 
+	clipboard := daemon.NewClipboardReader()
+	store := session.NewStore(12 * time.Hour)
+	srv := daemon.NewServer(addr, clipboard, tm, store)
+
+	// Claim the port before generating or writing any token. A second daemon
+	// that loses this race must leave the running one's credentials alone:
+	// writing the token file first and failing to bind afterwards rotated the
+	// file out from under a daemon still serving the old token.
+	listener, err := srv.Listen()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	var sess token.Session
 	var reused bool
-	var err error
 
 	if rotateToken {
 		sess, err = tm.Generate()
@@ -46,9 +58,6 @@ func cmdServe() {
 		log.Fatalf("failed to write token file: %v", err)
 	}
 
-	clipboard := daemon.NewClipboardReader()
-	store := session.NewStore(12 * time.Hour)
-	srv := daemon.NewServer(addr, clipboard, tm, store)
 	srv.SetTextWriter(daemon.NewClipboardTextWriter())
 	srv.SetVersion(version)
 	srv.EnableNoncePersistence()
@@ -80,7 +89,7 @@ func cmdServe() {
 		}
 	}()
 
-	if err := srv.ListenAndServe(); err != nil {
+	if err := srv.ServeListener(listener); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }

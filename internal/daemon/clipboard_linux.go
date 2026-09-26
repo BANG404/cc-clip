@@ -59,36 +59,47 @@ func (c *linuxClipboard) Type() (ClipboardInfo, error) {
 	return ClipboardInfo{Type: ClipboardEmpty}, nil
 }
 
+// imageMIMEs are the clipboard image types this reader can serve, in the order
+// Type() reports them. Both entries are tried on read: Type() already answers
+// "image" for a clipboard that only offers image/jpeg, and asking solely for
+// image/png there made the daemon fail a request it had just advertised.
+var imageMIMEs = []string{"image/png", "image/jpeg"}
+
 func (c *linuxClipboard) ImageBytes() ([]byte, error) {
 	// Try xclip
 	if xclipPath, err := exec.LookPath("xclip"); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), clipboardTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, xclipPath, "-selection", "clipboard", "-t", "image/png", "-o")
-		out, err := limitedCommandOutput(cmd, maxImageSize(), fmt.Sprintf("clipboard image exceeds %dMB limit", maxImageMB()))
-		if err == nil && len(out) > 0 {
-			return out, nil
-		}
-		if errors.Is(err, errClipboardOutputTooLarge) {
-			return nil, err
+		for _, mime := range imageMIMEs {
+			out, err := readClipboardImage(xclipPath, "-selection", "clipboard", "-t", mime, "-o")
+			if err == nil && len(out) > 0 {
+				return out, nil
+			}
+			if errors.Is(err, errClipboardOutputTooLarge) {
+				return nil, err
+			}
 		}
 	}
 
 	// Try wl-paste
 	if wlPath, err := exec.LookPath("wl-paste"); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), clipboardTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, wlPath, "--type", "image/png")
-		out, err := limitedCommandOutput(cmd, maxImageSize(), fmt.Sprintf("clipboard image exceeds %dMB limit", maxImageMB()))
-		if err == nil && len(out) > 0 {
-			return out, nil
-		}
-		if errors.Is(err, errClipboardOutputTooLarge) {
-			return nil, err
+		for _, mime := range imageMIMEs {
+			out, err := readClipboardImage(wlPath, "--type", mime)
+			if err == nil && len(out) > 0 {
+				return out, nil
+			}
+			if errors.Is(err, errClipboardOutputTooLarge) {
+				return nil, err
+			}
 		}
 	}
 
 	return nil, fmt.Errorf("no image in clipboard: xclip or wl-paste required")
+}
+
+func readClipboardImage(bin string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), clipboardTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	return limitedCommandOutput(cmd, maxImageSize(), fmt.Sprintf("clipboard image exceeds %dMB limit", maxImageMB()))
 }
 
 func (c *linuxClipboard) Text() (string, error) {

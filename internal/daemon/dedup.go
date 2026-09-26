@@ -8,8 +8,15 @@ import (
 )
 
 // DedupKey identifies a notification for deduplication purposes.
+//
+// Host and Session are part of the identity, not decoration: two remotes
+// running the same agent produce byte-identical "turn finished" text, and
+// without the originating host in the key the second host's notification was
+// swallowed as a repeat of the first.
 type DedupKey struct {
 	Source   string
+	Host     string
+	Session  string
 	Type     string
 	Title    string
 	BodyHash [16]byte
@@ -50,6 +57,8 @@ func (d *Deduper) AllowAt(env NotifyEnvelope, now time.Time) (bool, *NotifyEnvel
 	case env.ImageTransfer != nil:
 		key = DedupKey{
 			Source:   env.Source,
+			Host:     env.Host,
+			Session:  env.ImageTransfer.SessionID,
 			Type:     string(KindImageTransfer),
 			Title:    env.ImageTransfer.SessionID,
 			BodyHash: md5.Sum([]byte(env.ImageTransfer.Fingerprint)),
@@ -57,6 +66,8 @@ func (d *Deduper) AllowAt(env NotifyEnvelope, now time.Time) (bool, *NotifyEnvel
 	case msg != nil:
 		key = DedupKey{
 			Source:   env.Source,
+			Host:     env.Host,
+			Session:  dedupSession(env),
 			Type:     dedupType(env),
 			Title:    msg.Title,
 			BodyHash: md5.Sum([]byte(msg.Body)),
@@ -103,6 +114,16 @@ func (d *Deduper) AllowAt(env NotifyEnvelope, now time.Time) (bool, *NotifyEnvel
 // suppressed by dedup (e.g., permission prompts).
 func isAlwaysCritical(env NotifyEnvelope) bool {
 	return env.GenericMessage != nil && env.GenericMessage.Urgency == 2
+}
+
+// dedupSession returns the agent session a notification came from, so two
+// concurrent sessions on one host do not silence each other. Empty when the
+// producer sends no session id, which collapses to the previous behaviour.
+func dedupSession(env NotifyEnvelope) string {
+	if env.ToolAttention != nil {
+		return env.ToolAttention.SessionID
+	}
+	return ""
 }
 
 // dedupType extracts a notification subtype string used as part of the

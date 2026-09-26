@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -155,7 +156,7 @@ func TestOpencodePluginJSDefaultPort(t *testing.T) {
 		"export const CcClipNotifyPlugin",
 		"event:",
 		`event.type !== "session.idle"`,
-		"$`cc-clip plugin run opencode-notify`",
+		"$`cc-clip plugin run opencode-notify < ${payload}`",
 		".quiet().nothrow()",
 		"JSON.stringify({ event })",
 	}
@@ -163,6 +164,11 @@ func TestOpencodePluginJSDefaultPort(t *testing.T) {
 		if !strings.Contains(js, frag) {
 			t.Fatalf("opencodePluginJS(18339) missing %q:\n%s", frag, js)
 		}
+	}
+	// $ is Bun Shell; it exposes no writable .stdin, and reaching for one
+	// threw straight into the catch so nothing was ever notified.
+	if strings.Contains(js, "proc.stdin") || strings.Contains(js, "getWriter") {
+		t.Fatalf("plugin must not reach for a Bun Shell stdin writer:\n%s", js)
 	}
 	// Default port must NOT bake in an env prefix.
 	if strings.Contains(js, "CC_CLIP_PORT") {
@@ -172,7 +178,7 @@ func TestOpencodePluginJSDefaultPort(t *testing.T) {
 
 func TestOpencodePluginJSNonDefaultPort(t *testing.T) {
 	js := opencodePluginJS(9999)
-	want := "$`env CC_CLIP_PORT=9999 cc-clip plugin run opencode-notify`"
+	want := "$`env CC_CLIP_PORT=9999 cc-clip plugin run opencode-notify < ${payload}`"
 	if !strings.Contains(js, want) {
 		t.Fatalf("non-default-port JS must bake env prefix, got:\n%s", js)
 	}
@@ -230,4 +236,66 @@ func TestEnsureRemoteOpencodePluginSmoke(t *testing.T) {
 		t.Skipf("opencode not on PATH: %v", err)
 	}
 	t.Skip("manual smoke: drop opencodePluginJS into ~/.config/opencode/plugins, trigger a real session.idle, and confirm `cc-clip plugin run opencode-notify` is invoked. Skipped by default to avoid model-call cost.")
+}
+
+// TestOpencodePluginJSInvokesRunner executes the generated plugin with real Bun
+// and a stub `cc-clip` on PATH, asserting the event handler actually runs the
+// notify runner and hands it the event JSON on stdin.
+//
+// This is the assertion the template `contains` checks above cannot make. The
+// previous template passed every one of them while the plugin notified nothing:
+// it called an API Bun Shell does not have, and the throw landed in the
+// deliberately silent catch. Nothing here needs opencode, auth, or a model
+// call — only bun.
+func TestOpencodePluginJSInvokesRunner(t *testing.T) {
+	bunBin, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skipf("bun not on PATH: %v", err)
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	callLog := filepath.Join(dir, "calls.log")
+	stub := "#!/bin/sh\n{ printf 'ARGS: %s\\n' \"$*\"; printf 'STDIN: '; cat; printf '\\n'; } >> \"" + callLog + "\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "cc-clip"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cc-clip-notify.js"), []byte(opencodePluginJS(18339)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	driver := `import { $ } from "bun"
+import { CcClipNotifyPlugin } from "./cc-clip-notify.js"
+const plugin = await CcClipNotifyPlugin({ $ })
+await plugin.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
+await plugin.event({ event: { type: "session.error" } })
+`
+	if err := os.WriteFile(filepath.Join(dir, "driver.js"), []byte(driver), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bunBin, "run", "driver.js")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bun run driver.js: %v\n%s", err, out)
+	}
+
+	logged, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("the plugin never invoked cc-clip: %v", err)
+	}
+	got := string(logged)
+	if strings.Count(got, "ARGS:") != 1 {
+		t.Fatalf("want exactly one runner invocation (session.error must be ignored), got:\n%s", got)
+	}
+	if !strings.Contains(got, "ARGS: plugin run opencode-notify") {
+		t.Errorf("runner invoked with wrong arguments:\n%s", got)
+	}
+	if !strings.Contains(got, `STDIN: {"event":{"type":"session.idle"`) {
+		t.Errorf("event JSON did not reach the runner on stdin:\n%s", got)
+	}
 }

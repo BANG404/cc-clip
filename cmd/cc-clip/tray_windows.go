@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -72,12 +73,18 @@ type trayState struct {
 	hwnd        uintptr
 	icons       [3]uintptr // healthy, warning, error
 	currentIcon trayStatus
-	cfg         hotkeyConfig
-	binding     hotkeyBinding
-	daemonOK    bool
-	daemonPort  int
-	toastVBS    string // path to toast launcher VBS
-	toastPS1    string // path to toast PowerShell script
+	// cfgMu guards cfg. The menu handler runs on the message-loop thread while
+	// an upload goroutine reads the same struct, so the notification toggle was
+	// a plain unsynchronised write racing a read. Readers take a snapshot;
+	// writers publish a NEW *bool rather than mutating the one already handed
+	// out, so a snapshot stays valid after the toggle.
+	cfgMu      sync.RWMutex
+	cfg        hotkeyConfig
+	binding    hotkeyBinding
+	daemonOK   bool
+	daemonPort int
+	toastVBS   string // path to toast launcher VBS
+	toastPS1   string // path to toast PowerShell script
 }
 
 // NOTIFYICONDATAW (V2 — sufficient for balloon notifications).
@@ -139,6 +146,22 @@ var (
 )
 
 var globalTray *trayState
+
+// config returns a snapshot of the tray's configuration.
+func (t *trayState) config() hotkeyConfig {
+	t.cfgMu.RLock()
+	defer t.cfgMu.RUnlock()
+	return t.cfg
+}
+
+// setNotifications publishes a new notification setting and returns the
+// resulting configuration for persisting.
+func (t *trayState) setNotifications(enabled bool) hotkeyConfig {
+	t.cfgMu.Lock()
+	defer t.cfgMu.Unlock()
+	t.cfg.Notifications = &enabled
+	return t.cfg
+}
 
 func newTray(cfg hotkeyConfig, binding hotkeyBinding, daemonPort int) (*trayState, error) {
 	runtime.LockOSThread()
@@ -215,7 +238,7 @@ func (t *trayState) show() error {
 	}
 
 	// Show startup balloon
-	t.showBalloon("cc-clip", fmt.Sprintf("Hotkey %s ready\nHost: %s", t.binding.String(), t.cfg.Host), niifInfo)
+	t.showBalloon("cc-clip", fmt.Sprintf("Hotkey %s ready\nHost: %s", t.binding.String(), t.config().Host), niifInfo)
 
 	// Start health check timer
 	procSetTimer.Call(t.hwnd, timerHealthCheck, healthCheckIntervalMS, 0)
@@ -251,7 +274,7 @@ func (t *trayState) setStatus(s trayStatus) {
 }
 
 func (t *trayState) showBalloon(title, msg string, _ uint32) {
-	if t.toastVBS == "" || !t.cfg.notificationsEnabled() {
+	if cfg := t.config(); t.toastVBS == "" || !cfg.notificationsEnabled() {
 		return
 	}
 	// wscript.exe is a GUI subsystem process — no console window flash.
@@ -334,7 +357,7 @@ func (t *trayState) showContextMenu() {
 	appendMenuItem(hMenu, mfString|mfGrayed, menuIDTitle, versionStr)
 	appendMenuItem(hMenu, mfSeparator, 0, "")
 	appendMenuItem(hMenu, mfString|mfGrayed, menuIDHotkey, fmt.Sprintf("Hotkey: %s", t.binding.String()))
-	appendMenuItem(hMenu, mfString|mfGrayed, menuIDHost, fmt.Sprintf("Host: %s", t.cfg.Host))
+	appendMenuItem(hMenu, mfString|mfGrayed, menuIDHost, fmt.Sprintf("Host: %s", t.config().Host))
 
 	daemonStatus := "Daemon: running"
 	if !t.daemonOK {
@@ -344,7 +367,7 @@ func (t *trayState) showContextMenu() {
 	appendMenuItem(hMenu, mfSeparator, 0, "")
 	appendMenuItem(hMenu, mfString, menuIDOpenLog, "Open Log")
 	appendMenuItem(hMenu, mfString, menuIDOpenConfig, "Open Config Folder")
-	if t.cfg.notificationsEnabled() {
+	if cfg := t.config(); cfg.notificationsEnabled() {
 		appendMenuItem(hMenu, mfString, menuIDToggleNotify, "Mute Notifications")
 	} else {
 		appendMenuItem(hMenu, mfString, menuIDToggleNotify, "Enable Notifications")
@@ -369,10 +392,10 @@ func (t *trayState) handleMenuCommand(id uint16) {
 		configPath := hotkeyConfigPath()
 		exec.Command("explorer.exe", filepath.Dir(configPath)).Start()
 	case menuIDToggleNotify:
-		enabled := t.cfg.notificationsEnabled()
-		v := !enabled
-		t.cfg.Notifications = &v
-		if err := saveHotkeyConfig(t.cfg); err != nil {
+		cfg := t.config()
+		v := !cfg.notificationsEnabled()
+		updated := t.setNotifications(v)
+		if err := saveHotkeyConfig(updated); err != nil {
 			log.Printf("tray: failed to save notification setting: %v", err)
 		} else if v {
 			t.showBalloon("cc-clip", "Notifications enabled", niifInfo)
@@ -421,7 +444,7 @@ func trayWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		}
 		go func() {
 			defer hotkeyRunning.Store(false)
-			if err := handleHotkeyPress(t.cfg, t.binding); err != nil {
+			if err := handleHotkeyPress(t.config(), t.binding); err != nil {
 				log.Printf("hotkey: send failed: %v", err)
 				return
 			}

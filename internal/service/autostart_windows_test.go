@@ -247,3 +247,31 @@ func TestGenerateVBSContainsRestartLoop(t *testing.T) {
 		}
 	}
 }
+
+// TestStatusIgnoresHostnamesContainingServe pins the substring bug: a bare
+// -match 'serve' selected `cc-clip.exe hotkey myserver --run-loop`, so Uninstall
+// taskkill /F'd the user's hotkey process along with the daemon.
+func TestStatusIgnoresHostnamesContainingServe(t *testing.T) {
+	cases := []struct {
+		commandLine string
+		want        bool
+	}{
+		{`"C:\tools\cc-clip.exe" serve --port 18339`, true},
+		{`cc-clip.exe serve --port 18339`, true},
+		{`cc-clip.exe hotkey myserver --run-loop`, false},
+		{`cc-clip.exe hotkey --run-loop --remote-dir C:\serve`, false},
+		// The match must be anchored at argv0, not free to start anywhere:
+		// a file argument may legitimately contain the text "cc-clip serve".
+		{`cc-clip.exe send myserver "C:\images\cc-clip serve.png"`, false},
+		{`"C:\tools\cc-clip.exe" send host "C:\a\cc-clip serve.png"`, false},
+		// PowerShell's -match is case-insensitive; Go must agree or Status and
+		// the kill path disagree about the same process.
+		{`"C:\tools\CC-CLIP.EXE" serve --port 18339`, true},
+		{`C:\tools\cc-clip.exe serve`, true},
+	}
+	for _, tc := range cases {
+		if got := serveSubcommandRE.MatchString(tc.commandLine); got != tc.want {
+			t.Errorf("match(%q) = %v, want %v", tc.commandLine, got, tc.want)
+		}
+	}
+}

@@ -315,3 +315,124 @@ func TestEnsureSSHConfig_PreservesExistingDirectives(t *testing.T) {
 		t.Fatal("Host myserver should come before Host *")
 	}
 }
+
+// TestEnsureRewritesConflictingControlMaster pins the first-value-wins rule:
+// appending "ControlMaster no" under an existing "ControlMaster auto" changed
+// nothing, so the pre-existing master was still reused and the RemoteForward
+// still failed silently.
+func TestEnsureRewritesConflictingControlMaster(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	existing := "Host venus\n    ControlMaster auto\n    ControlPath ~/.ssh/cm-%r@%h:%p\n\nHost *\n    ServerAliveInterval 60\n"
+	if err := os.WriteFile(cfg, []byte(existing), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureSSHConfigAt(cfg, "venus", 18339); err != nil {
+		t.Fatalf("ensureSSHConfigAt: %v", err)
+	}
+
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	if strings.Contains(body, "ControlMaster auto") {
+		t.Fatalf("conflicting ControlMaster survived:\n%s", body)
+	}
+	if strings.Contains(body, "cm-%r@%h:%p") {
+		t.Fatalf("conflicting ControlPath survived:\n%s", body)
+	}
+	if strings.Count(body, "ControlMaster") != 1 || strings.Count(body, "ControlPath") != 1 {
+		t.Fatalf("directives must be rewritten in place, not duplicated:\n%s", body)
+	}
+}
+
+// TestEnsureMatchesHostnameForUserAtHostDestination pins the Host pattern: ssh
+// matches on the hostname alone, so a literal "Host user@venus" block never
+// applied and its RemoteForward never took effect.
+func TestEnsureMatchesHostnameForUserAtHostDestination(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	if err := os.WriteFile(cfg, []byte("Host *\n    ServerAliveInterval 60\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureSSHConfigAt(cfg, "bob@venus", 18339); err != nil {
+		t.Fatalf("ensureSSHConfigAt: %v", err)
+	}
+
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	if strings.Contains(body, "Host bob@venus") {
+		t.Fatalf("Host pattern must not carry the user part:\n%s", body)
+	}
+	if !strings.Contains(body, "Host venus") {
+		t.Fatalf("Host pattern must match the hostname:\n%s", body)
+	}
+}
+
+// TestEnsureStopsHostBlockAtMatch pins the scope boundary: a Host block ran on
+// through a following Match, so cc-clip rewrote the Match block's directives
+// and appended its RemoteForward into that foreign scope.
+func TestEnsureStopsHostBlockAtMatch(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	existing := "Host venus\n    User bob\n\nMatch host other\n    ControlMaster auto\n"
+	if err := os.WriteFile(cfg, []byte(existing), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureSSHConfigAt(cfg, "venus", 18339); err != nil {
+		t.Fatalf("ensureSSHConfigAt: %v", err)
+	}
+
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	hostPart, matchPart, found := strings.Cut(body, "Match host other")
+	if !found {
+		t.Fatalf("the Match block must survive:\n%s", body)
+	}
+	if !strings.Contains(hostPart, "RemoteForward 18339") {
+		t.Fatalf("RemoteForward must land inside the Host venus block:\n%s", body)
+	}
+	if strings.Contains(matchPart, "RemoteForward") || !strings.Contains(matchPart, "ControlMaster auto") {
+		t.Fatalf("the Match block must be left exactly as it was:\n%s", body)
+	}
+}
+
+// TestEnsureWarnsAboutScopesItCannotSee pins the honesty contract: an Include
+// or an earlier block setting ControlMaster can win OpenSSH's first-value
+// race, so cc-clip reports a warning instead of claiming the fix took effect.
+func TestEnsureWarnsAboutScopesItCannotSee(t *testing.T) {
+	cases := []struct {
+		name, existing, want string
+	}{
+		{"include", "Include ~/.ssh/config.d/*\n\nHost venus\n    User bob\n", "Include"},
+		{"earlier control directive", "Host ven*\n    ControlMaster auto\n\nHost venus\n    User bob\n", "earlier Host/Match"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := filepath.Join(t.TempDir(), "config")
+			if err := os.WriteFile(cfg, []byte(tc.existing), 0600); err != nil {
+				t.Fatal(err)
+			}
+			changes, err := ensureSSHConfigAt(cfg, "venus", 18339)
+			if err != nil {
+				t.Fatalf("ensureSSHConfigAt: %v", err)
+			}
+			for _, c := range changes {
+				if c.Action == "warning" && strings.Contains(c.Detail, tc.want) && strings.Contains(c.Detail, "ssh -G") {
+					return
+				}
+			}
+			t.Fatalf("expected a warning naming %q and the ssh -G check, got %+v", tc.want, changes)
+		})
+	}
+}
