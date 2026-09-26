@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md @ 7694090fe90162db9cb66e4a2087ce0b4fab8e7f -->
+<!-- i18n-source: README.md @ befc99e90ceb3323cbf32fdb53f9c81a426da032 -->
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -26,6 +26,8 @@
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
   <a href="#选择目标">选择目标</a> ·
+  <a href="#你可以做什么">你可以做什么</a> ·
+  <a href="#全部命令">全部命令</a> ·
   <a href="#工作原理">工作原理</a> ·
   <a href="#文档">文档</a>
 </p>
@@ -95,7 +97,7 @@ cc-clip doctor --host myserver
 | 所有集成 | `cc-clip setup myserver --all` | 是 | 是 | Codex 需要 Xvfb |
 | opencode | `cc-clip setup myserver --opencode` | 是 | 是 | `xclip` 或 `wl-paste` |
 | Antigravity | `cc-clip setup myserver --agy` | 否 | 是 | 仅通知集成 |
-| Cursor CLI | `cc-clip setup myserver --cursor` | 是 | 否 | Cursor 所在 shell 中需已设置 `DISPLAY` 或 `WAYLAND_DISPLAY` |
+| Cursor CLI | `cc-clip setup myserver --cursor` | 是 | 是 | Cursor 所在 shell 中需已设置 `DISPLAY` 或 `WAYLAND_DISPLAY` |
 
 对于 Codex 目标，cc-clip 会尝试使用 `apt` 或 `dnf` 安装 Xvfb。如果
 无法使用免密码 `sudo`，它会停止并输出准确的安装命令；
@@ -110,7 +112,8 @@ Cursor 有一个部署无法代为满足的前提条件：只有当 Cursor 所�
 一个：背后没有 X 服务器的 `DISPLAY` 会让该 shell 中所有其他工具的剪贴板回退
 必然失败。此外 Cursor 约 4 秒后就会停止等待剪贴板辅助进程，因此在慢速链路上
 传大图时，请在远程 shell rc 中加入 `export CC_CLIP_FETCH_TIMEOUT_MS=3000`。
-Cursor 的通知集成尚未接入。
+Cursor 的通知来自合并进 `~/.cursor/hooks.json` 的 stop hook；该文件中你自己的
+hook 会被保留。
 
 如果远程的 `cc-clip` 已由包管理器管理，可用 `cc-clip setup myserver
 --use-remote-bin` 保留这种归属。设置过程会在你远程**登录 shell** 的 PATH 下
@@ -125,6 +128,10 @@ Cursor 的通知集成尚未接入。
 > opencode 和 Antigravity 的集成生成已有测试覆盖，但尚未在代表性主机上
 > 对事件交付进行冒烟测试。请
 > [报告测试结果](https://github.com/ShunmeiCho/cc-clip/issues)。
+>
+> Kimi Code 和 MastraCode 通过 shim 会拦截的 `wl-paste` / `xclip` 调用读取
+> 剪贴板，因此使用默认目标即可粘贴图片。这一点已通过对照其源码的静态核对和
+> shim 测试验证，尚未用真实 CLI 做端到端验证。
 
 ### 其他本地平台
 
@@ -137,6 +144,125 @@ Cursor 的通知集成尚未接入。
 Windows 支持仍处于实验阶段。请先使用 [Windows 快速开始](docs/windows-quickstart.md)
 中的显式上传并粘贴工作流。另有一个可选的直接 RemoteForward 传输
 （自 v0.9.1 起提供），但它不是默认方案。
+
+## 你可以做什么
+
+下面每个功能都说明：它做什么、为什么要用、怎么开启，以及正常工作时你会看到
+什么。把 `myserver` 换成你的主机名。
+
+### 把图片粘贴到远程代理
+
+- **作用：**在远程的 Claude Code、opencode、Cursor、Kimi Code 或 MastraCode
+  会话中按 `Ctrl+V`，粘贴的是你本地剪贴板里的图片。
+- **为什么：**远程代理看不到你 Mac 的剪贴板。没有 cc-clip 时，你得先保存截图，
+  用 `scp` 传过去，再手动输入它的路径。
+- **怎么用：**运行 `cc-clip setup myserver`（opencode 或 Cursor 加上 `--opencode`
+  或 `--cursor`），然后打开一个**新的** `ssh myserver`，照常粘贴。
+- **你会看到：**代理像在本地一样附上图片；同时 Mac 会弹出一条 `cc-clip #N` 通知，
+  显示图片的尺寸和格式，漏粘或重复粘贴一眼就能看出来。
+
+### 把图片粘贴到 Codex CLI
+
+- **作用：**同样的 `Ctrl+V`，用于 Codex。
+- **为什么：**Codex 直接读取 X11 剪贴板，不调用 `xclip`，上面的 shim 够不到它。
+  cc-clip 会在远程运行一个私有的虚拟显示（Xvfb），从那里提供你的图片。
+- **怎么用：**运行 `cc-clip setup myserver --codex`（若还要保留 Claude Code，用
+  `--all`），然后打开新的 SSH 会话，让 shell 读入显示设置。
+- **你会看到：**Codex 附上图片。如果没有，请看[故障排查](#故障排查)中关于 Codex
+  的条目。
+
+### 把远程的文本复制到本地剪贴板
+
+- **作用：**在远程复制的文本会进入你的本地剪贴板。
+- **为什么：**用鼠标选中文本时，复制的是终端画出来的内容，长行会被软换行拆断。
+  在远程一侧复制，字节保持原样。
+- **怎么用：**在远程把任意内容通过管道交给 `cc-clip copy`；或者把 neovim /
+  tmux copy-mode 设置为使用 `xclip` 或 `wl-copy` 后直接 yank
+  （[各自的配置方法](docs/reverse-copy.md)）：
+
+  ```bash
+  git diff | cc-clip copy
+  ```
+
+- **你会看到：**文本出现在本地剪贴板，并弹出一条 "Clipboard set by remote" 通知。
+  通知里不会包含复制的内容，连续多次 yank 只显示为一条通知。
+
+### 代理需要你时收到桌面通知
+
+- **作用：**远程代理结束一轮回答、或等待工具授权时，Mac 会通知你。
+- **为什么：**你可以去别的窗口工作，不必盯着终端。远程的通知通常无法穿过 SSH。
+- **怎么用：**不需要额外操作：`setup` / `connect` 会为你选择的每个目标接好通知
+  hook（[各 CLI 的细节](docs/notifications.md)）。
+- **你会看到：**例如一条 "Tool approval needed" 通知，内容是 Claude Code 自己的
+  授权提示。要确认某台主机的通知确实能送达，运行
+  `cc-clip doctor --host myserver`，看下面的 `delivery-receipt` 行。
+
+### 检查一切是否正常
+
+- **作用：**`cc-clip doctor --host myserver` 会检查从你的剪贴板到远程代理的每一环，
+  每项检查都报告为 `[pass]` 或 `[FAIL]`，并附上原因。
+- **为什么：**粘贴可能在多个环节失败（守护进程、SSH 转发、token、shim、PATH），
+  每种情况的修法都不同。
+- **怎么用：**先在本地复制一张图片，然后在本地机器上运行上面的命令。
+- **你会看到：**每项检查一行。先修第一个 `[FAIL]`，后面的通常是它引起的。通知相关的
+  行永远不会让检查失败，它们告诉你这台主机上每个 CLI 最近一次送达通知的时间：
+
+  ```text
+    delivery-receipt:claude: [pass] last notification accepted 2h13m ago
+    delivery-receipt: [pass] never received from: cursor, opencode, agy (fine for any you do not use on this host)
+  ```
+
+### 保留你自己的 `xclip` 或 `wl-paste`
+
+- **作用：**对于 `~/.local/bin/xclip`、`wl-paste` 或 `wl-copy` 处不是 cc-clip 写入的
+  普通文件，cc-clip 绝不会覆盖。（如果那里是符号链接，链接会被替换，但它指向的程序
+  保持不动，并成为 shim 的回退目标。）
+- **为什么：**那个文件可能是你自己的包装脚本或构建产物；悄悄丢掉它会让其他工具出问题。
+- **怎么用：**如果 `connect` 停下并提示 `... already exists and was not written by
+  cc-clip`，你可以自己把文件移开，或者让 cc-clip 把它移到一旁：
+
+  ```bash
+  cc-clip connect myserver --adopt-foreign-shim
+  ```
+
+- **你会看到：**你的程序被移到 `~/.local/bin/xclip.cc-clip-real`。shim 不处理的调用
+  都会交给这个程序；在远程运行 `cc-clip uninstall` 会把它移回原处。
+
+### 让每台主机保持最新
+
+- **作用：**`cc-clip hosts list` 列出这台机器部署过的每台主机，以及它的 cc-clip 版本
+  和最近一次连接的时间。
+- **为什么：**本地和远程是分别升级的；停留在旧版本的主机会继续使用旧的 shim 和 hook。
+- **怎么用：**先在本地升级，再逐台重新部署：
+
+  ```bash
+  cc-clip update
+  cc-clip connect myserver --force
+  ```
+
+- **你会看到：**`cc-clip hosts list` 显示该主机已是新版本。
+
+### 从主机上移除 cc-clip
+
+- **作用：**撤销 `setup` / `connect` 安装的内容。
+- **为什么：**不再在某台主机上使用 cc-clip，或者想从干净的状态重新开始。
+- **怎么用：**移除要在两个地方进行，因为 shim 在远程。先做远程这一步：本地那一步会
+  删除让远程 shell 找到 `cc-clip` 的 PATH 配置。
+
+  ```bash
+  # 1. 在远程主机上：移除 shim，并恢复被收养的程序。
+  #    Wayland 主机需要加 --target wl-paste（同时处理 wl-copy）。
+  cc-clip uninstall
+
+  # 2. 在本地机器上：移除托管的 Claude hook 和 PATH 标记
+  cc-clip uninstall --host myserver
+  #    如果用过 Codex，再移除它的显示和桥接器
+  cc-clip uninstall --codex --host myserver
+  ```
+
+- **你会看到：**远程输出 `Shim removed successfully.`。如果期间有其他进程改动了 shim
+  或你的程序，卸载会停下、不删除任何东西，并说明它把什么留在了哪里；等路径稳定后再
+  运行一次即可。在 Mac 上，第 2 步还会警告本地没有 shim 可删，这是正常的。
 
 ## 工作原理
 
@@ -175,6 +301,7 @@ Notifications
 | Codex CLI | `notify` 命令 | 任务完成 |
 | opencode | 生成的 plugin | 会话空闲 |
 | Antigravity | 生成的 plugin | 代理停止 |
+| Cursor CLI | `~/.cursor/hooks.json` 中的 stop hook | 一轮回答结束 |
 
 有关适配器细节、手动配置、nonce 注册和诊断，请参见
 [SSH 通知](docs/notifications.md)。
@@ -194,23 +321,60 @@ Notifications
 你文件的其他进程。在共享或不受信任的主机上使用 cc-clip 前，
 请阅读明确的[威胁模型](SECURITY.md)。
 
-## 核心命令
+## 全部命令
+
+下面列出 `cc-clip` 的每个命令，按运行它的机器分组。
+[命令参考](docs/commands.md)列出了每个选项。
+
+**在本地机器上：设置和维护主机**
+
+| 命令 | 作用及使用时机 |
+|---|---|
+| `cc-clip setup HOST [target]` | 首次设置一台主机：检查本地依赖、添加 SSH `RemoteForward`、启动守护进程、部署。从这里开始。 |
+| `cc-clip connect HOST [target]` | 向已设置好的主机部署（或重新部署）cc-clip。只重新发送有变化的部分。 |
+| `cc-clip connect HOST --force` | 忽略主机上报的状态，完整重新部署。在 `cc-clip update` 之后、或主机出问题时使用。 |
+| `cc-clip connect HOST --token-only` | 只发送当前 token。守护进程重启后粘贴报 token 错误时使用。 |
+| `cc-clip connect HOST --adopt-foreign-shim` | 部署时把不是 cc-clip 写入的 `xclip` / `wl-paste` / `wl-copy` 移到一旁，而不是停下。参见[保留你自己的 `xclip`](#保留你自己的-xclip-或-wl-paste)。 |
+| `cc-clip hosts list` | 列出这台机器部署过的每台主机，以及版本、Codex 状态和最近连接时间。升级后用它找出需要重新部署的主机。 |
+| `cc-clip hosts forget HOST` | 从上述列表中移除一台主机，不会动远程。 |
+| `cc-clip uninstall --host HOST` | 从主机上移除托管的 Claude hook 和 PATH 标记。请先在该主机上运行 `cc-clip uninstall`；参见[从主机上移除 cc-clip](#从主机上移除-cc-clip)。 |
+| `cc-clip uninstall --codex --host HOST` | 从主机上移除 Codex 支持：停止桥接器和 Xvfb，删除 Codex 的 `notify` 配置和显示设置。 |
+
+**在本地机器上：守护进程和本机安装**
+
+| 命令 | 作用及使用时机 |
+|---|---|
+| `cc-clip serve` | 在前台运行剪贴板守护进程。本地机器是 Linux 时需要它；macOS 和 Windows 用下面的服务。`--rotate-token` 强制生成新 token。 |
+| `cc-clip service install` / `uninstall` / `status` | 让守护进程随登录启动（macOS launchd、Windows 登录启动）、移除它，或查看它的状态。`setup` 会替你安装。 |
+| `cc-clip status` | 显示守护进程是否在运行、使用哪个端口、token 是否存在。快速的本地检查。 |
+| `cc-clip doctor` | 只检查本地一侧。 |
+| `cc-clip doctor --host HOST` | 检查到某台主机的完整链路，并显示通知最近一次送达的时间。粘贴失败时第一个要运行的命令。 |
+| `cc-clip update` | 在本机安装最新发布版本（macOS / Linux）。`--check` 只报告；`--to vX.Y.Z` 指定版本。之后对每台主机运行 `connect HOST --force`。 |
+| `cc-clip version` / `help` | 显示版本号，或内置的命令列表。 |
+
+**在 Windows 上（实验性）**
+
+| 命令 | 作用及使用时机 |
+|---|---|
+| `cc-clip send [HOST] [FILE]` | 把剪贴板图片或某个文件上传到主机，并输出它的远程路径。加 `--paste` 还会把该路径输入到当前窗口。 |
+| `cc-clip hotkey [HOST]` | 运行一个全局热键（默认 `Alt+Shift+V`），一次按键完成 `send --paste`。用 `--enable-autostart`、`--status`、`--stop` 管理它。参见 [Windows 快速开始](docs/windows-quickstart.md)。 |
+
+**在远程主机上**
+
+| 命令 | 作用及使用时机 |
+|---|---|
+| `some-command \| cc-clip copy` | 把管道传入的文本原样放到你的**本地**剪贴板。超过一行的内容都应该用它，而不是鼠标选择。 |
+| `cc-clip uninstall` | 移除这台主机上的剪贴板 shim，并放回用 `--adopt-foreign-shim` 收养的程序。Wayland 主机要加 `--target wl-paste`。 |
+| `cc-clip notify --title T --body B` | 向你的本地桌面发送自定义通知，例如在长脚本结束时。除非加上 `--trusted`，标题会以 `[unverified]` 开头。 |
+| `cc-clip paste` | 把本地剪贴板中的图片保存为远程上的文件，并输出其路径。适用于接收图片路径而不是粘贴的脚本和工具。 |
+
+**cc-clip 内部使用**（你不需要手动运行）
 
 | 命令 | 用途 |
 |---|---|
-| `cc-clip setup HOST [target]` | 首次配置依赖、SSH config、守护进程和部署 |
-| `cc-clip setup HOST --use-remote-bin` | 配置远程二进制由包管理器管理的主机 |
-| `cc-clip connect HOST --force [target]` | 修复或完整重新部署主机 |
-| `cc-clip connect HOST --token-only` | 同步已轮换或过期的 token |
-| `cc-clip doctor --host HOST` | 端到端诊断 |
-| `some-command \| cc-clip copy`（在远程执行） | 把远程输出复制到本地剪贴板，绕过终端软换行 |
-| `cc-clip status` | 查看本地组件状态 |
-| `cc-clip hosts list` | 查看已知主机注册表 |
-| `cc-clip update --check` | 检查发布渠道中的最新版本 |
-| `cc-clip update` | 安装最新发布版本 |
-
-运行 `cc-clip --help` 查看权威命令列表。
-[命令指南](docs/commands.md)涵盖常用选项和环境变量。
+| `cc-clip install` | 安装 shim；`connect` 会在远程运行它。 |
+| `cc-clip plugin run NAME` | 各代理调用的通知 hook（`claude-notify`、`codex-notify`、`opencode-notify`、`agy-notify`、`cursor-notify`）。 |
+| `cc-clip x11-bridge` | 通过 Xvfb 向 Codex 提供剪贴板；由 `connect --codex` 启动。 |
 
 ### 配置
 

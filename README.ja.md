@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md @ 7694090fe90162db9cb66e4a2087ce0b4fab8e7f -->
+<!-- i18n-source: README.md @ befc99e90ceb3323cbf32fdb53f9c81a426da032 -->
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -26,6 +26,8 @@
 <p align="center">
   <a href="#クイックスタート">クイックスタート</a> ·
   <a href="#ターゲットを選ぶ">ターゲットを選ぶ</a> ·
+  <a href="#できること">できること</a> ·
+  <a href="#すべてのコマンド">すべてのコマンド</a> ·
   <a href="#仕組み">仕組み</a> ·
   <a href="#ドキュメント">ドキュメント</a>
 </p>
@@ -95,7 +97,7 @@ cc-clip doctor --host myserver
 | すべての統合 | `cc-clip setup myserver --all` | はい | はい | Codex には Xvfb |
 | opencode | `cc-clip setup myserver --opencode` | はい | はい | `xclip` または `wl-paste` |
 | Antigravity | `cc-clip setup myserver --agy` | いいえ | はい | 通知統合のみ |
-| Cursor CLI | `cc-clip setup myserver --cursor` | はい | いいえ | Cursor を実行する shell に `DISPLAY` または `WAYLAND_DISPLAY` が設定されていること |
+| Cursor CLI | `cc-clip setup myserver --cursor` | はい | はい | Cursor を実行する shell に `DISPLAY` または `WAYLAND_DISPLAY` が設定されていること |
 
 Codex ターゲットでは、cc-clip は `apt` または `dnf` を使って Xvfb のインストールを試みます。
 passwordless `sudo` が使えない場合は停止し、正確なインストールコマンドを表示します。
@@ -111,7 +113,8 @@ Cursor にはデプロイでは満たせない前提条件が 1 つあります�
 ない `DISPLAY` は、その shell のほかのすべてのツールのクリップボードフォールバックを
 確実に壊してしまうからです。また Cursor は約 4 秒でクリップボードヘルパーの待機を
 打ち切るため、遅いリンクで大きな画像を転送する場合はリモート shell の rc に
-`export CC_CLIP_FETCH_TIMEOUT_MS=3000` を追加してください。Cursor の通知統合は未対応です。
+`export CC_CLIP_FETCH_TIMEOUT_MS=3000` を追加してください。Cursor の通知は
+`~/.cursor/hooks.json` にマージされる stop hook から届きます。このファイル内の既存のフックはそのまま残ります。
 
 リモートの `cc-clip` がすでにパッケージマネージャの管理下にある場合は、
 `cc-clip setup myserver --use-remote-bin` でその所有権を保てます。セットアップはリモートの
@@ -127,6 +130,11 @@ asdf のインストールも見つかります）、バージョンとハッシ
 > opencode と Antigravity の統合生成はテストでカバーされていますが、代表的なマシンでの
 > ホストイベント配信はまだ smoke test されていません。
 > 結果を [報告してください](https://github.com/ShunmeiCho/cc-clip/issues)。
+>
+> Kimi Code と MastraCode は shim がインターセプトする `wl-paste` / `xclip` 呼び出しで
+> クリップボードを読み取るため、デフォルトのターゲットで画像の貼り付けが動作するはずです。
+> これはソースに対する静的な確認と shim のテストで検証されていますが、実際の CLI での
+> end-to-end の検証はまだです。
 
 ### その他のローカルプラットフォーム
 
@@ -139,6 +147,128 @@ asdf のインストールも見つかります）、バージョンとハッシ
 Windows サポートは引き続き実験的です。まずは [Windows クイックスタート](docs/windows-quickstart.md)の
 明示的なアップロードと貼り付けのワークフローを使用してください。任意で有効にする
 直接 RemoteForward 転送もあります（v0.9.1 以降）が、これはデフォルトではありません。
+
+## できること
+
+以下の各機能について、何をするのか、なぜ使うのか、どう有効にするのか、動作しているときに何が見えるのかを説明します。`myserver` は自分のホスト名に置き換えてください。
+
+### リモートの agent に画像を貼り付ける
+
+- **内容:** リモートの Claude Code、opencode、Cursor、Kimi Code、MastraCode セッションで
+  `Ctrl+V` を押すと、ローカルのクリップボードにある画像が貼り付けられます。
+- **理由:** リモートの agent からは Mac のクリップボードが見えません。cc-clip がなければ、
+  スクリーンショットを保存し、`scp` で転送し、そのパスを入力する必要があります。
+- **使い方:** `cc-clip setup myserver` を実行し（opencode や Cursor では `--opencode` または
+  `--cursor` を追加）、**新しい** `ssh myserver` を開いて通常どおり貼り付けてください。
+- **結果:** agent はローカルと同じように画像を添付します。また Mac には画像のサイズと形式を
+  示す `cc-clip #N` 通知が表示されるため、貼り付けの抜けや重複にすぐ気づけます。
+
+### Codex CLI に画像を貼り付ける
+
+- **内容:** Codex でも同じく `Ctrl+V` で貼り付けられます。
+- **理由:** Codex は `xclip` を呼び出さず X11 のクリップボードを直接読み取るため、上記の shim
+  では届きません。cc-clip はリモートで専用の仮想ディスプレイ（Xvfb）を動かし、そこから画像を渡します。
+- **使い方:** `cc-clip setup myserver --codex`（Claude Code も残す場合は `--all`）を実行し、
+  shell がディスプレイ設定を読み込むように新しい SSH セッションを開いてください。
+- **結果:** Codex が画像を添付します。添付されない場合は
+  [トラブルシューティング](#トラブルシューティング)の Codex の項目を参照してください。
+
+### リモートのテキストをローカルのクリップボードへコピーする
+
+- **内容:** リモートでコピーしたテキストがローカルのクリップボードに入ります。
+- **理由:** マウスでテキストを選択すると、ターミナルが描画した内容がコピーされるため、長い行は
+  折り返しの改行で分断されて戻ってきます。リモート側でコピーすれば、バイト列がそのまま保たれます。
+- **使い方:** リモートで任意の出力を `cc-clip copy` にパイプするか、neovim / tmux の copy-mode を
+  `xclip` または `wl-copy` を使うように設定した上で yank してください
+  （[それぞれの設定方法](docs/reverse-copy.md)）。
+
+  ```bash
+  git diff | cc-clip copy
+  ```
+
+- **結果:** テキストがローカルのクリップボードに入り、"Clipboard set by remote" という通知が
+  表示されます。通知の本文にコピーした内容が含まれることはなく、連続した yank は 1 つの通知にまとめられます。
+
+### agent が操作を待っているときにデスクトップ通知を受け取る
+
+- **内容:** リモートの agent がターンを終えたときや、ツールの承認を待っているときに Mac へ通知します。
+- **理由:** ターミナルを見張る代わりに、別のウィンドウで作業できます。リモートの通知は通常 SSH を越えて届きません。
+- **使い方:** 追加の作業は不要です。`setup` / `connect` が、選択したすべてのターゲットの通知フックを設定します
+  （[CLI ごとの詳細](docs/notifications.md)）。
+- **結果:** たとえば Claude Code 自身の承認メッセージを含む "Tool approval needed" 通知が表示されます。
+  ホストからの通知が実際に届いているかを確認するには、`cc-clip doctor --host myserver` を実行し、
+  下記の `delivery-receipt` の行を確認してください。
+
+### すべてが動作するか確認する
+
+- **内容:** `cc-clip doctor --host myserver` は、クリップボードからリモートの agent までの
+  すべての経路をテストし、各チェックを理由とともに `[pass]` または `[FAIL]` で報告します。
+- **理由:** 貼り付けは複数の箇所（デーモン、SSH forward、token、shim、PATH）で失敗する可能性があり、
+  箇所ごとに対処方法が異なります。
+- **使い方:** ローカルで画像をコピーしてから、上記のコマンドをローカルマシンで実行してください。
+- **結果:** チェックごとに 1 行が表示されます。最初の `[FAIL]` を修正してください。以降の失敗は
+  たいていそこから派生しています。通知の行が実行を失敗させることはなく、このホストから各 CLI が
+  最後に通知を届けた時刻を示します。
+
+  ```text
+    delivery-receipt:claude: [pass] last notification accepted 2h13m ago
+    delivery-receipt: [pass] never received from: cursor, opencode, agy (fine for any you do not use on this host)
+  ```
+
+### 自分の `xclip` や `wl-paste` を残す
+
+- **内容:** cc-clip は、`~/.local/bin/xclip`、`wl-paste`、`wl-copy` にある自分が書いていない
+  通常ファイルを上書きしません。（そこにある symlink は置き換えられますが、リンク先のプログラムは
+  そのまま残り、shim のフォールバック先になります。）
+- **理由:** そのファイルは自作のラッパーやビルドかもしれません。黙って失われると、ほかのツールが壊れます。
+- **使い方:** `connect` が `... already exists and was not written by cc-clip` で停止した場合は、
+  自分でファイルを移動するか、cc-clip に退避させてください。
+
+  ```bash
+  cc-clip connect myserver --adopt-foreign-shim
+  ```
+
+- **結果:** プログラムは `~/.local/bin/xclip.cc-clip-real` へ移動されます。shim は自分で処理しない
+  呼び出しをすべてそのプログラムに渡し、リモートで `cc-clip uninstall` を実行すると元の場所へ戻ります。
+
+### すべてのホストを最新に保つ
+
+- **内容:** `cc-clip hosts list` は、このマシンがデプロイしたホストを、cc-clip のバージョンと
+  最後に確認された時刻とともに表示します。
+- **理由:** ローカル側とリモート側は別々にアップグレードされます。古いバージョンのまま残った
+  ホストは、古い shim とフックを使い続けます。
+- **使い方:** ローカルをアップグレードしてから、各ホストを再デプロイしてください。
+
+  ```bash
+  cc-clip update
+  cc-clip connect myserver --force
+  ```
+
+- **結果:** `cc-clip hosts list` がそのホストの新しいバージョンを表示します。
+
+### ホストから cc-clip を削除する
+
+- **内容:** `setup` / `connect` がインストールしたものを元に戻します。
+- **理由:** ホストで cc-clip の使用をやめるため、またはクリーンな状態からやり直すためです。
+- **使い方:** shim はリモートにあるため、削除は 2 か所で行います。先にリモート側の手順を
+  実行してください。ローカル側の手順は、リモートの shell が `cc-clip` を見つけるための PATH
+  エントリを削除するためです。
+
+  ```bash
+  # 1. リモートホストで: shim を削除し、退避したプログラムがあれば元に戻す。
+  #    Wayland のホストでは --target wl-paste が必要です（wl-copy も対象になります）。
+  cc-clip uninstall
+
+  # 2. ローカルマシンで: 管理対象の Claude フックと PATH marker を削除する
+  cc-clip uninstall --host myserver
+  #    Codex を使っていた場合は、そのディスプレイとブリッジも削除する
+  cc-clip uninstall --codex --host myserver
+  ```
+
+- **結果:** リモートに `Shim removed successfully.` と表示されます。その間に別のプロセスが shim や
+  プログラムを変更していた場合、uninstall は何も削除せずに停止し、何をどこに残したかを表示します。
+  パスが落ち着いたら再実行してください。Mac では、手順 2 で削除するローカルの shim がないという
+  警告も表示されますが、これは想定どおりです。
 
 ## 仕組み
 
@@ -176,6 +306,7 @@ Notifications
 | Codex CLI | `notify` コマンド | タスク完了 |
 | opencode | 生成された plugin | セッション idle |
 | Antigravity | 生成された plugin | agent 停止 |
+| Cursor CLI | `~/.cursor/hooks.json` の stop hook | ターン終了 |
 
 adapter の詳細、手動設定、nonce 登録、診断については、
 [SSH 通知](docs/notifications.md)を参照してください。
@@ -195,23 +326,60 @@ adapter の詳細、手動設定、nonce 登録、診断については、
 別プロセスからの防御は行いません。共有または信頼できないホストで cc-clip を使用する前に、
 明示的な [threat model](SECURITY.md) を確認してください。
 
-## 主要コマンド
+## すべてのコマンド
+
+`cc-clip` のすべてのコマンドを、実行するマシンごとにまとめています。すべての flag は
+[コマンドリファレンス](docs/commands.md)に記載されています。
+
+**ローカルマシンで: ホストのセットアップと保守**
+
+| コマンド | 内容と使うタイミング |
+|---|---|
+| `cc-clip setup HOST [target]` | 1 台のホストの初回セットアップです。ローカル依存関係の確認、SSH の `RemoteForward` の追加、デーモンの起動、デプロイを行います。まずここから始めてください。 |
+| `cc-clip connect HOST [target]` | セットアップ済みのホストに cc-clip をデプロイ（または再デプロイ）します。変更された部分だけが再送されます。 |
+| `cc-clip connect HOST --force` | ホストが報告する状態を無視して完全に再デプロイします。`cc-clip update` の後や、ホストが壊れたときに使用してください。 |
+| `cc-clip connect HOST --token-only` | 現在の token だけを送ります。デーモンの再起動後に token エラーで貼り付けが止まったときに使用してください。 |
+| `cc-clip connect HOST --adopt-foreign-shim` | 自分が書いていない `xclip` / `wl-paste` / `wl-copy` を、停止する代わりに退避させてデプロイします。[自分の `xclip` を残す](#自分の-xclip-や-wl-paste-を残す)を参照してください。 |
+| `cc-clip hosts list` | このマシンがデプロイしたすべてのホストを、バージョン、Codex の状態、最終確認時刻とともに表示します。アップデート後に再デプロイが必要なホストを探すときに使用してください。 |
+| `cc-clip hosts forget HOST` | その一覧からホストを削除します。リモートには触れません。 |
+| `cc-clip uninstall --host HOST` | ホストから管理対象の Claude フックと PATH marker を削除します。先にホスト上で `cc-clip uninstall` を実行してください。[cc-clip の削除](#ホストから-cc-clip-を削除する)を参照してください。 |
+| `cc-clip uninstall --codex --host HOST` | ホストから Codex サポートを削除します。ブリッジと Xvfb を停止し、Codex の `notify` エントリとディスプレイ設定を取り除きます。 |
+
+**ローカルマシンで: デーモンと自分のインストール**
+
+| コマンド | 内容と使うタイミング |
+|---|---|
+| `cc-clip serve` | クリップボードデーモンをフォアグラウンドで実行します。ローカルマシンが Linux の場合に必要です。macOS と Windows では下記のサービスを使用します。`--rotate-token` で新しい token を強制的に生成します。 |
+| `cc-clip service install` / `uninstall` / `status` | ログイン時にデーモンを起動する設定（macOS launchd、Windows のログオン）を行う、削除する、または状態を表示します。`setup` が自動でインストールします。 |
+| `cc-clip status` | デーモンが動作しているか、どのポートを使っているか、token が存在するかを表示します。ローカルの簡単な確認です。 |
+| `cc-clip doctor` | ローカル側だけを確認します。 |
+| `cc-clip doctor --host HOST` | ホストまでの経路全体を確認し、通知が最後に届いた時刻を表示します。貼り付けが失敗したときに最初に実行してください。 |
+| `cc-clip update` | このマシンに最新のリリースをインストールします（macOS / Linux）。`--check` は報告のみ、`--to vX.Y.Z` はバージョンを指定します。その後、各ホストで `connect HOST --force` を実行してください。 |
+| `cc-clip version` / `help` | バージョン、または組み込みのコマンド一覧を表示します。 |
+
+**Windows で（実験的）**
+
+| コマンド | 内容と使うタイミング |
+|---|---|
+| `cc-clip send [HOST] [FILE]` | クリップボードの画像、またはファイルをホストへアップロードし、リモートのパスを表示します。`--paste` を付けると、そのパスをアクティブなウィンドウに入力します。 |
+| `cc-clip hotkey [HOST]` | 1 回のキー操作で `send --paste` を実行するグローバルホットキー（デフォルトは `Alt+Shift+V`）を動かします。`--enable-autostart`、`--status`、`--stop` で管理します。[Windows クイックスタート](docs/windows-quickstart.md)を参照してください。 |
+
+**リモートホストで**
+
+| コマンド | 内容と使うタイミング |
+|---|---|
+| `some-command \| cc-clip copy` | パイプされたテキストをバイト単位でそのまま**ローカル**のクリップボードに入れます。1 行を超える内容は、マウス選択の代わりにこれを使用してください。 |
+| `cc-clip uninstall` | このホストのクリップボード shim を削除し、`--adopt-foreign-shim` で退避したプログラムを元に戻します。Wayland のホストでは `--target wl-paste` を追加してください。 |
+| `cc-clip notify --title T --body B` | 長いスクリプトの終了時などに、自分の通知をローカルのデスクトップへ送ります。`--trusted` を付けない場合、タイトルの先頭に `[unverified]` が付きます。 |
+| `cc-clip paste` | ローカルのクリップボードの画像をリモートのファイルに保存し、そのパスを表示します。貼り付けではなく画像のパスを受け取るスクリプトやツール向けです。 |
+
+**cc-clip 自身が使用するもの**（実行する必要はありません）
 
 | コマンド | 用途 |
 |---|---|
-| `cc-clip setup HOST [target]` | 初回の依存関係、SSH 設定、デーモン、デプロイ |
-| `cc-clip setup HOST --use-remote-bin` | リモートバイナリがパッケージ管理されているホストを設定 |
-| `cc-clip connect HOST --force [target]` | ホストの修復または完全な再デプロイ |
-| `cc-clip connect HOST --token-only` | rotation または期限切れになった token の同期 |
-| `cc-clip doctor --host HOST` | end-to-end 診断 |
-| `some-command \| cc-clip copy`（リモートで実行） | リモートの出力をターミナルの折り返しを経ずにローカルのクリップボードへコピー |
-| `cc-clip status` | ローカルコンポーネントの状態 |
-| `cc-clip hosts list` | 既知のホスト registry |
-| `cc-clip update --check` | 公開済み release channel の確認 |
-| `cc-clip update` | 最新の公開済みリリースをインストール |
-
-正確なコマンド一覧は `cc-clip --help` を実行して確認してください。
-[コマンドガイド](docs/commands.md)では、一般的な flag と environment variable を説明しています。
+| `cc-clip install` | shim をインストールします。`connect` がリモートで実行します。 |
+| `cc-clip plugin run NAME` | 各 agent が呼び出す通知フックです（`claude-notify`、`codex-notify`、`opencode-notify`、`agy-notify`、`cursor-notify`）。 |
+| `cc-clip x11-bridge` | Xvfb 経由で Codex にクリップボードを渡します。`connect --codex` が起動します。 |
 
 ### 設定
 
