@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
-.PHONY: build test vet clean release-local release-preflight
+.PHONY: build test vet clean release-local release-preflight release-notes-check
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/cc-clip/
@@ -76,3 +76,19 @@ release-local: clean
 	done
 	@echo "Binaries in dist/"
 	@ls -lh dist/
+
+# Release notes are written before the tag and become the GitHub release body
+# (release.yml passes them to goreleaser). Run with the tag you are about to
+# push: make release-notes-check V=v0.11.2
+release-notes-check:
+	@test -n "$(V)" || { echo "usage: make release-notes-check V=vX.Y.Z"; exit 1; }
+	@test -s "docs/release-notes/$(V).md" || { \
+		echo "FAIL: docs/release-notes/$(V).md is missing or empty."; \
+		echo "Write the user-facing notes (see docs/release.md, Phase 2.5) and commit them before tagging."; \
+		exit 1; \
+	}
+	@grep -q "^## What's New in $(V)" "docs/release-notes/$(V).md" || { \
+		echo "FAIL: docs/release-notes/$(V).md must start its body with: ## What's New in $(V)"; \
+		exit 1; \
+	}
+	@echo "release notes OK: docs/release-notes/$(V).md"

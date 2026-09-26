@@ -31,9 +31,17 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The user-facing notes are written and committed before the tag, and
+      # they become the release body. Writing them after publishing was a
+      # manual step that got skipped (v0.11.1 shipped with only the commit
+      # list), so a tag without notes now fails here, before anything is
+      # published.
+      - name: Release notes exist for this tag
+        run: make release-notes-check V="$GITHUB_REF_NAME"
+
       - uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes docs/release-notes/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
