@@ -181,7 +181,7 @@ _cc_clip_post_text() {
 ARGS="$*"
 
 case "$ARGS" in
-    *"-selection clipboard"*"-t TARGETS"*"-o"*)
+    *"-selection clipboard"*"-t TARGETS"*"-o"*|*"-selection clipboard"*"-target TARGETS"*"-o"*)
         # Claude checks clipboard targets
         _cc_clip_log "intercepting TARGETS check"
         if _cc_clip_probe; then
@@ -208,7 +208,7 @@ case "$ARGS" in
         fi
         ;;
 
-    *"-selection clipboard"*"-t image/"*"-o"*)
+    *"-selection clipboard"*"-t image/"*"-o"*|*"-selection clipboard"*"-target image/"*"-o"*)
         # Claude reads clipboard image — fetch to temp file then cat (binary-safe + fallback-safe)
         _cc_clip_log "intercepting image read"
         if _cc_clip_probe; then
@@ -449,14 +449,21 @@ _cc_clip_fetch_binary() {
 
 ARGS="$*"
 
-# Supported invocation shapes:
-#   Claude Code: wl-paste --list-types  /  wl-paste --type image/png
-#   opencode:    wl-paste -t image/png  (short -t instead of --type)
-# The patterns below cover both. We intentionally do not match the -l
-# short form of --list-types because no current consumer uses it and
-# matching standalone "-l" without false positives is non-trivial.
-case "$ARGS" in
-    *"--list-types"*)
+# Claude also probes with -l; Kimi reads with -t image (a generic type).
+# Inspect actual argv tokens so -lh, --list, and imagefoo stay unmatched.
+# Keep the original argv untouched for fallback.
+_cc_clip_kind=""
+_cc_clip_prev=""
+for _cc_clip_arg in "$@"; do
+    if [ "$_cc_clip_arg" = "-l" ]; then
+        _cc_clip_kind="list"
+    elif [ "$_cc_clip_prev" = "-t" ] && [ "$_cc_clip_arg" = "image" ] && [ "$_cc_clip_kind" != "list" ]; then
+        _cc_clip_kind="image"
+    fi
+    _cc_clip_prev="$_cc_clip_arg"
+done
+case "$_cc_clip_kind:$ARGS" in
+    list:*|*"--list-types"*)
         # Type listing (Claude)
         _cc_clip_log "intercepting type listing"
         if _cc_clip_probe; then
@@ -479,7 +486,7 @@ case "$ARGS" in
         fi
         ;;
 
-    *"--type"*"image/"*|*"-t image/"*)
+    image:*|*"--type"*"image/"*|*"-t image/"*)
         # Image read (Claude --type / opencode -t) — fetch to temp file then cat
         # (binary-safe + fallback-safe)
         _cc_clip_log "intercepting image read"
@@ -494,7 +501,7 @@ case "$ARGS" in
         fi
         ;;
 
-    *"--type"*"text/"*|*"-t text/"*|"")
+    *"--type"*"text/"*|*"-t text/"*|":")
         # Text read (typed or default wl-paste)
         _cc_clip_log "intercepting text read"
         if _cc_clip_probe; then
