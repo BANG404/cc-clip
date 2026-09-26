@@ -95,8 +95,9 @@ Set up and deploy (run on your local machine):
     --use-remote-bin Use cc-clip from the remote PATH; skip binary upload
     --local-bin      Path to pre-downloaded remote binary
     --auto-recover   Recover from v0.7.0 wrapper corruption
-                     Other deploy flags (--force, --adopt-foreign-shim, --no-hooks,
-                     --no-notify) are connect-only: run connect after setup.
+                     setup rejects connect-only flags (--force, --token-only,
+                     --adopt-foreign-shim, --no-hooks, --hooks, --no-notify):
+                     run setup first, then connect with the flag.
   connect <host>     Deploy or redeploy cc-clip to a host (incremental)
     --port           Tunnel port (default: 18339)
     --claude/--codex/--opencode/--agy/--cursor/--all   Deployment target (see below)

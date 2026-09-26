@@ -37,7 +37,7 @@ Complete cc-clip command reference. For what each feature is for and what you sh
 | `cc-clip connect <host> --auto-recover` | Recover from v0.7.0 wrapper corruption + reinstall (mutex with --token-only) |
 | `cc-clip setup <host> --auto-recover` | Same recovery flow via setup path |
 | `cc-clip connect <host> --force` | Full redeploy ignoring cache |
-| `cc-clip connect <host> --adopt-foreign-shim` | If a regular file cc-clip did not write occupies `xclip` / `wl-paste` / `wl-copy` in `~/.local/bin`, move it to `<path>.cc-clip-real` and fall back to it instead of refusing. Connect-only: `setup` does not pass it on |
+| `cc-clip connect <host> --adopt-foreign-shim` | If a regular file cc-clip did not write occupies `xclip` / `wl-paste` / `wl-copy` in `~/.local/bin`, move it to `<path>.cc-clip-real` and fall back to it instead of refusing. Connect-only: `setup` rejects it; run `setup` first, then `connect` with the flag |
 | `cc-clip connect <host> --no-notify` | Deploy without notification setup (nonce sync and agent hooks) |
 | `cc-clip connect <host> --no-hooks` / `--hooks` | Persistently disable / re-enable Claude Code hook injection |
 | `cc-clip connect <host> --local-bin <path>` | Deploy this pre-downloaded remote binary instead of fetching one |
