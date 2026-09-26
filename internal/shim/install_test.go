@@ -9,6 +9,125 @@ import (
 	"testing"
 )
 
+func assertAdoptedProgramRestored(t *testing.T, path, original string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != original {
+		t.Fatalf("uninstall must restore the original program at %s: got %q, err %v", path, got, err)
+	}
+	if _, err := os.Lstat(path + AdoptedSuffix); !os.IsNotExist(err) {
+		t.Fatalf("restored program must not leave a sidecar at %s: %v", path+AdoptedSuffix, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+		t.Fatalf("restored program lost its mode: %v", info.Mode())
+	}
+}
+
+func TestUninstallRestoresAdoptedWlPaste(t *testing.T) {
+	testUninstallRestoresWaylandProgram(t, "wl-paste")
+}
+
+func TestUninstallRestoresAdoptedWlCopyCompanion(t *testing.T) {
+	testUninstallRestoresWaylandProgram(t, "wl-copy")
+}
+
+func testUninstallRestoresWaylandProgram(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	original := "#!/bin/sh\necho CUSTOM-" + name + "\n"
+	if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallWithOptions(TargetWlPaste, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Uninstall(TargetWlPaste, dir); err != nil {
+		t.Fatal(err)
+	}
+	assertAdoptedProgramRestored(t, path, original)
+	other := "wl-copy"
+	if name == other {
+		other = "wl-paste"
+	}
+	if _, err := os.Lstat(filepath.Join(dir, other)); !os.IsNotExist(err) {
+		t.Fatalf("unadopted %s shim must be removed: %v", other, err)
+	}
+}
+
+func TestUninstallPreservesAdoptedProgramWhenDestinationOccupied(t *testing.T) {
+	for _, name := range []string{"xclip", "wl-copy"} {
+		for _, occupant := range []string{"file", "dangling-symlink"} {
+			t.Run(name+"/"+occupant, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, name)
+				original := "#!/bin/sh\necho ORIGINAL\n"
+				if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				target := TargetXclip
+				if name == "wl-copy" {
+					target = TargetWlPaste
+				}
+				if _, err := InstallWithOptions(target, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if occupant == "file" {
+					if err := os.WriteFile(path, []byte("new occupant"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Symlink("missing", path); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				err := Uninstall(target, dir)
+				if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), path+AdoptedSuffix) {
+					t.Errorf("restore conflict must name destination %s and preserved sidecar %s, got: %v", path, path+AdoptedSuffix, err)
+				}
+				if got, err := os.ReadFile(path + AdoptedSuffix); err != nil || string(got) != original {
+					t.Fatalf("failed restore must preserve the sidecar: %q, %v", got, err)
+				}
+				if occupant == "file" {
+					if got, err := os.ReadFile(path); err != nil || string(got) != "new occupant" {
+						t.Fatalf("destination was overwritten: %q, %v", got, err)
+					}
+				} else if got, err := os.Readlink(path); err != nil || got != "missing" {
+					t.Fatalf("destination symlink was overwritten: %q, %v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestUninstallReportsUnrestorableSidecar(t *testing.T) {
+	dir := t.TempDir()
+	res, err := Install(TargetXclip, dir, 18339)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unexpected sidecar type must be reported and preserved, not moved
+	// into the executable path or silently abandoned.
+	sidecar := res.ShimPath + AdoptedSuffix
+	if err := os.Mkdir(sidecar, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sidecar, "program"), []byte("saved program"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Uninstall(TargetXclip, dir); err == nil || !strings.Contains(err.Error(), sidecar) {
+		t.Errorf("failed restoration must name the preserved sidecar %s, got: %v", sidecar, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(sidecar, "program")); err != nil || string(got) != "saved program" {
+		t.Fatalf("unrestorable sidecar must be preserved: %q, %v", got, err)
+	}
+}
+
 func TestInstallAndUninstallXclip(t *testing.T) {
 	dir := t.TempDir()
 
@@ -354,14 +473,12 @@ func TestInstallReportsAnIncompleteRollback(t *testing.T) {
 	}
 }
 
-// TestReinstallKeepsTheAdoptedProgramAsFallback pins the adopt path across the
-// uninstall-then-install cycle connect runs on --force or a port change. The
-// adopted program's location lived only inside the old shim, so the reinstall
-// fell back to a PATH search that skips installDir and lost the user's program.
+// Uninstall restores the user's program; reinstall needs fresh consent to adopt it.
 func TestReinstallKeepsTheAdoptedProgramAsFallback(t *testing.T) {
 	dir := t.TempDir()
 	victim := filepath.Join(dir, "xclip")
-	if err := os.WriteFile(victim, []byte("#!/bin/sh\necho CUSTOM-FALLBACK\n"), 0o755); err != nil {
+	original := "#!/bin/sh\necho CUSTOM-FALLBACK\n"
+	if err := os.WriteFile(victim, []byte(original), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := InstallWithOptions(TargetXclip, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
@@ -371,12 +488,21 @@ func TestReinstallKeepsTheAdoptedProgramAsFallback(t *testing.T) {
 		t.Fatalf("uninstall failed: %v", err)
 	}
 
-	res, err := Install(TargetXclip, dir, 18339)
+	assertAdoptedProgramRestored(t, victim, original)
+	if _, err := Install(TargetXclip, dir, 18339); err == nil || !strings.Contains(err.Error(), AdoptFlagHint) {
+		t.Fatalf("plain reinstall must refuse and name %s, got: %v", AdoptFlagHint, err)
+	}
+	assertAdoptedProgramRestored(t, victim, original)
+
+	res, err := InstallWithOptions(TargetXclip, dir, 18339, InstallOptions{AdoptForeign: true})
 	if err != nil {
-		t.Fatalf("reinstall failed: %v", err)
+		t.Fatalf("explicit re-adoption failed: %v", err)
 	}
 
 	adopted := victim + AdoptedSuffix
+	if got, err := os.ReadFile(adopted); err != nil || string(got) != original {
+		t.Fatalf("re-adoption must preserve the program: %q, %v", got, err)
+	}
 	if res.RealBinPath != adopted {
 		t.Fatalf("reinstall must keep falling back to the adopted program; RealBinPath = %q, want %q", res.RealBinPath, adopted)
 	}
