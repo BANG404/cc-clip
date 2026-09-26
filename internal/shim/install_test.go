@@ -1,8 +1,11 @@
 package shim
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -24,6 +27,139 @@ func assertAdoptedProgramRestored(t *testing.T, path, original string) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 		t.Fatalf("restored program lost its mode: %v", info.Mode())
+	}
+}
+
+// Use a subprocess overlay to deny hard links without requiring a privileged
+// Linux fixture or a mounted filesystem. All other filesystem operations are real.
+func TestUninstallWithoutHardLinkSupport(t *testing.T) {
+	if os.Getenv("CC_CLIP_TEST_DENY_LINK") != "1" {
+		sourcePath, err := filepath.Abs("install.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, failure := range []string{"operation not permitted", "operation not supported"} {
+			t.Run(failure, func(t *testing.T) {
+				patched := strings.ReplaceAll(string(source), "os.Link(", "uninstallTestDeniedLink(")
+				patched = strings.ReplaceAll(patched, "os.Rename(", "uninstallTestRename(")
+				patched += fmt.Sprintf("\nfunc uninstallTestDeniedLink(_, _ string) error { return errors.New(%q) }\n", failure)
+				// Observe the restore boundary too: remove-then-rename must not
+				// pass merely because the final executable is eventually present.
+				patched += `
+func uninstallTestRename(from, to string) error {
+	if strings.HasSuffix(from, AdoptedSuffix) && !isOurShim(to) {
+		return errors.New("restore must rename directly over our still-present shim")
+	}
+	return os.Rename(from, to)
+}
+`
+				dir := t.TempDir()
+				replacement := filepath.Join(dir, "install.go")
+				if err := os.WriteFile(replacement, []byte(patched), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				overlay, err := json.Marshal(map[string]any{"Replace": map[string]string{sourcePath: replacement}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				overlayPath := filepath.Join(dir, "overlay.json")
+				if err := os.WriteFile(overlayPath, overlay, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("go", "test", "-overlay", overlayPath, ".", "-run", "^TestUninstallWithoutHardLinkSupport$", "-count=1", "-v")
+				cmd.Env = append(os.Environ(), "CC_CLIP_TEST_DENY_LINK=1")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("hard-link fault probe: %v\n%s", err, out)
+				}
+			})
+		}
+		return
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "xclip")
+	original := "#!/bin/sh\necho ORIGINAL\n"
+	if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallWithOptions(TargetXclip, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+		t.Fatal(err)
+	}
+	err := Uninstall(TargetXclip, dir)
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("original executable path disappeared: %v", statErr)
+	}
+	if err != nil {
+		t.Fatalf("renameable program must restore without hard links: %v", err)
+	}
+	assertAdoptedProgramRestored(t, path, original)
+}
+
+func TestUninstallWaylandPreflightsAllPaths(t *testing.T) {
+	for _, adopted := range []bool{false, true} {
+		for _, conflict := range []string{"destination", "main-sidecar", "companion-sidecar"} {
+			t.Run(fmt.Sprintf("adopted=%t/%s", adopted, conflict), func(t *testing.T) {
+				dir := t.TempDir()
+				main, companion := filepath.Join(dir, "wl-paste"), filepath.Join(dir, "wl-copy")
+				for _, path := range []string{main, companion} {
+					if path == main && !adopted {
+						continue
+					}
+					if err := os.WriteFile(path, []byte("#!/bin/sh\necho ORIGINAL\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := InstallWithOptions(TargetWlPaste, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+					t.Fatal(err)
+				}
+				badPath := companion
+				if conflict == "destination" {
+					if err := os.WriteFile(badPath, []byte("#!/bin/sh\necho FOREIGN\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if conflict == "main-sidecar" {
+						badPath = main
+					}
+					badPath += AdoptedSuffix
+					if err := os.Remove(badPath); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+					if err := os.Symlink("missing-original", badPath); err != nil {
+						t.Skipf("symlinks unavailable: %v", err)
+					}
+				}
+				// Refusal must preserve identity, mode and bytes/link targets of
+				// every entry, including absent sidecars.
+				for _, path := range []string{main, companion, main + AdoptedSuffix, companion + AdoptedSuffix} {
+					path := path
+					info, statErr := os.Lstat(path)
+					data, _ := os.ReadFile(path)
+					link, _ := os.Readlink(path)
+					t.Cleanup(func() {
+						after, err := os.Lstat(path)
+						if os.IsNotExist(statErr) && os.IsNotExist(err) {
+							return
+						}
+						if err != nil || info == nil || !os.SameFile(info, after) || info.Mode() != after.Mode() {
+							t.Errorf("entry changed on refused uninstall: %s (%v)", path, err)
+							return
+						}
+						got, _ := os.ReadFile(path)
+						gotLink, _ := os.Readlink(path)
+						if string(got) != string(data) || gotLink != link {
+							t.Errorf("contents changed on refused uninstall: %s", path)
+						}
+					})
+				}
+				if err := Uninstall(TargetWlPaste, dir); err == nil || !strings.Contains(err.Error(), badPath) {
+					t.Fatalf("conflict must name preserved path %s: %v", badPath, err)
+				}
+			})
+		}
 	}
 }
 

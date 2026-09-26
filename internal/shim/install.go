@@ -254,56 +254,78 @@ func Uninstall(target Target, installDir string) error {
 	binName := string(resolved)
 	shimPath := filepath.Join(installDir, binName)
 
-	if err := uninstallShim(shimPath); err != nil {
-		return err
-	}
-
-	// The wayland install ships a wl-copy companion; remove it with its
-	// wl-paste sibling, but only when it is genuinely ours.
+	paths := []string{shimPath}
 	if resolved == TargetWlPaste {
-		wlCopyPath := filepath.Join(installDir, "wl-copy")
-		if isOurShim(wlCopyPath) || adoptedDelegate(wlCopyPath) != "" {
-			if err := uninstallShim(wlCopyPath); err != nil {
-				return err
-			}
+		paths = append(paths, filepath.Join(installDir, "wl-copy"))
+	}
+	// Inspect EVERY destination and sidecar before changing ANY entry. A
+	// companion conflict must not strand the main shim halfway uninstalled.
+	var pending []string
+	for i, path := range paths {
+		remove, _, err := preflightUninstallShim(path, i != 0)
+		if err != nil {
+			return err
+		}
+		if remove {
+			pending = append(pending, path)
 		}
 	}
-
+	for _, path := range pending {
+		if err := uninstallShim(path); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// An optional companion without a sidecar may be absent or foreign; leave it
+// alone. A sidecar of ANY type must be inspected, not hidden by adoptedDelegate.
+func preflightUninstallShim(path string, optional bool) (remove, restore bool, err error) {
+	sidecar := path + AdoptedSuffix
+	info, err := os.Lstat(sidecar)
+	if err != nil && !os.IsNotExist(err) {
+		return false, false, fmt.Errorf("failed to inspect adopted program at %s; left untouched: %w", sidecar, err)
+	}
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return false, false, fmt.Errorf("cannot restore %s to %s: sidecar is not a regular file; left untouched", sidecar, path)
+		}
+		restore = true
+	}
+	if !isOurShim(path) {
+		if restore {
+			return false, false, fmt.Errorf("cannot restore %s to %s: destination is not a cc-clip shim; program remains at %s", sidecar, path, sidecar)
+		}
+		if optional {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("%s is not a cc-clip shim (or does not exist)", path)
+	}
+	return true, restore, nil
 }
 
 // uninstallShim removes only our shim and restores any adopted regular file.
 func uninstallShim(path string) error {
+	_, restore, err := preflightUninstallShim(path, false)
+	if err != nil {
+		return err
+	}
 	sidecar := path + AdoptedSuffix
-	if !isOurShim(path) {
-		if adoptedDelegate(path) != "" {
+	if restore {
+		// Recheck ownership immediately before replacing our shim. Residual
+		// race: a foreign file substituted between this check and Rename can
+		// be overwritten. Rename keeps the executable path continuously present
+		// and needs no hard-link support; a failed rename leaves both entries.
+		if !isOurShim(path) {
 			return fmt.Errorf("cannot restore %s to %s: destination is not a cc-clip shim; program remains at %s", sidecar, path, sidecar)
 		}
-		return fmt.Errorf("%s is not a cc-clip shim (or does not exist)", path)
+		if err := os.Rename(sidecar, path); err != nil {
+			return fmt.Errorf("failed to restore %s to %s; program remains at %s: %w", sidecar, path, sidecar, err)
+		}
+		return nil
 	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("failed to remove shim %s (any adopted program remains at %s): %w", path, sidecar, err)
-	}
-
-	info, err := os.Lstat(sidecar)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to inspect adopted program at %s: %w", sidecar, err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("cannot restore %s to %s: sidecar is not a regular file; left untouched", sidecar, path)
-	}
-
-	// Link then unlink implements a no-clobber move for this same-directory
-	// regular file. Rename would overwrite a destination created concurrently,
-	// even with an Lstat check first. On failure the sidecar stays recoverable.
-	if err := os.Link(sidecar, path); err != nil {
-		return fmt.Errorf("failed to restore %s to %s; program remains at %s: %w", sidecar, path, sidecar, err)
-	}
-	if err := os.Remove(sidecar); err != nil {
-		return fmt.Errorf("restored program at %s but failed to remove sidecar %s: %w", path, sidecar, err)
 	}
 	return nil
 }
