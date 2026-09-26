@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/shunmei/cc-clip/internal/shim"
@@ -52,6 +54,45 @@ func TestShimPresenceCheckRecognizesAnInstalledShim(t *testing.T) {
 
 	if err := exec.Command(bash, "-c", shimPresenceCheck(filepath.Join(dir, "absent"))).Run(); err == nil {
 		t.Fatal("probe accepted a missing file")
+	}
+}
+
+// TestReadPidArgsShellNeedsNoPs runs the argv probe against a live process
+// with ps unreachable, the busybox situation: `ps -p` failed there, so the
+// bridge was never recognized for stop or restore.
+func TestReadPidArgsShellNeedsNoPs(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+		t.Skip("no /proc; the remote side is always Linux")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	// The trailing `; :` keeps bash from exec-ing sleep, so the bash process
+	// itself carries the bridge-shaped argv.
+	proc := exec.Command(bash, "-c", "sleep 30; :", "cc-clip", "x11-bridge", "--display", ":42", "--port", "29999")
+	if err := proc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proc.Process.Kill(); _ = proc.Wait() })
+
+	// A PATH holding only tr: ps is unreachable, as `ps -p` is on busybox.
+	trPath, err := exec.LookPath("tr")
+	if err != nil {
+		t.Skip("tr not available")
+	}
+	onlyTr := t.TempDir()
+	if err := os.Symlink(trPath, filepath.Join(onlyTr, "tr")); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`PATH=%s; pid=%d; %s && printf '%%s' "$args"`, onlyTr, proc.Process.Pid, readPidArgsShell)
+	out, err := exec.Command(bash, "-c", script).Output()
+	if err != nil {
+		t.Fatalf("probe failed without ps: %v", err)
+	}
+	display, port, ok := bridgeDisplayPort(string(out))
+	if !strings.Contains(string(out), "cc-clip x11-bridge") || !ok || display != "42" || port != 29999 {
+		t.Fatalf("probe read %q; want the bridge argv with display 42 and port 29999", out)
 	}
 }
 

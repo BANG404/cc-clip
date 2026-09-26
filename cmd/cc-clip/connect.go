@@ -1264,12 +1264,21 @@ func codexAuthEnvPath() string {
 	return `"$HOME` + strings.TrimPrefix(xvfb.AuthFilePath(codexStateDir), "~") + `"`
 }
 
+// readPidArgsShell sets $args to the argv of process $pid, space-joined.
+//
+// It reads /proc rather than `ps -p "$pid" -o args=`: busybox ps rejects -p, so
+// on busybox remotes the bridge was never recognized — stop left it running and
+// the upload path never restored it. The remote is always Linux, where
+// /proc/<pid>/cmdline needs no userland tool.
+const readPidArgsShell = `args=$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)`
+
 // stopBridgeRemote stops the x11-bridge on the remote (safe: verifies command).
 func stopBridgeRemote(session *shim.SSHSession) {
 	stopScript := fmt.Sprintf(
 		`pid=$(cat %s/bridge.pid 2>/dev/null) && \
 [ -n "$pid" ] && \
-ps -p "$pid" -o args= 2>/dev/null | grep -q 'cc-clip x11-bridge' && \
+`+readPidArgsShell+` && \
+case "$args" in *'cc-clip x11-bridge'*) true ;; *) false ;; esac && \
 kill "$pid" 2>/dev/null && \
 sleep 0.5 && \
 kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null; \
@@ -1293,7 +1302,7 @@ func runningBridgeArgs(session *shim.SSHSession) (string, bool) {
 		`pid=$(cat %s/bridge.pid 2>/dev/null) && \
 [ -n "$pid" ] && \
 kill -0 "$pid" 2>/dev/null && \
-args=$(ps -p "$pid" -o args= 2>/dev/null) && \
+`+readPidArgsShell+` && \
 case "$args" in *'cc-clip x11-bridge'*) printf '%s%%s\n' "$args" ;; esac; true`,
 		codexStateDir, begin,
 	)
