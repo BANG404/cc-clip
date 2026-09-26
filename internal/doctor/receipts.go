@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/daemon"
+	"github.com/shunmei/cc-clip/internal/token"
 )
 
 // ReceiptStaleAfter is how old a delivery receipt may get before doctor calls
@@ -21,15 +22,17 @@ const receiptCheckName = "delivery-receipt"
 // three states (recent, stale, never received) are information, kept distinct
 // rather than folded into one pass/fail.
 func DeliveryReceipts(host string) []CheckResult {
-	path, err := daemon.ReceiptStorePath()
+	dir, err := token.TokenDir()
 	if err != nil {
 		return []CheckResult{{receiptCheckName, true, fmt.Sprintf("receipt store unavailable: %v", err)}}
 	}
-	receipts, err := daemon.LoadReceipts(path)
+	// Every daemon (one per port) keeps its own store; read them all.
+	receipts, err := daemon.LoadAllReceipts(dir)
+	results := classifyReceipts(host, receipts, time.Now())
 	if err != nil {
-		return []CheckResult{{receiptCheckName, true, fmt.Sprintf("receipt store unreadable: %v", err)}}
+		results = append(results, CheckResult{receiptCheckName, true, fmt.Sprintf("some receipt stores were unreadable: %v", err)})
 	}
-	return classifyReceipts(host, receipts, time.Now())
+	return results
 }
 
 func classifyReceipts(host string, receipts []daemon.Receipt, now time.Time) []CheckResult {

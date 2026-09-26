@@ -78,8 +78,7 @@ type Server struct {
 	addr              string
 	mux               *http.ServeMux
 	textWriter        ClipboardTextWriter // nil until SetTextWriter; POST /clipboard/text answers 501 without it
-	receiptsPath      string              // empty until EnableDeliveryReceipts; /notify then records a Receipt per acceptance
-	receiptsMu        sync.Mutex          // serializes this daemon's read-merge-write of the receipt store
+	receiptCh         chan receiptEvent   // nil until EnableDeliveryReceipts; drained by the single receipt writer
 	version           string              // reported by /health when set via SetVersion (#22 P2)
 }
 
@@ -106,25 +105,48 @@ func NewServer(addr string, clipboard ClipboardReader, tokens *token.Manager, se
 	return s
 }
 
-// EnableDeliveryReceipts makes /notify record a Receipt in the store at path
-// for every accepted notification. Tests leave it off unless they exercise
-// receipts directly.
-func (s *Server) EnableDeliveryReceipts(path string) {
-	s.receiptsMu.Lock()
-	s.receiptsPath = path
-	s.receiptsMu.Unlock()
+// receiptQueueCap bounds receipts waiting for the writer. A full queue drops
+// the receipt, never the notification: receipts are diagnostics.
+const receiptQueueCap = 64
+
+type receiptEvent struct {
+	host, target string
+	at           time.Time
 }
 
-// recordReceipt stores that env was accepted. A failure is logged, never
-// returned: a receipt is diagnostics, and the notification itself was fine.
-func (s *Server) recordReceipt(env NotifyEnvelope) {
-	s.receiptsMu.Lock()
-	defer s.receiptsMu.Unlock()
-	if s.receiptsPath == "" {
+// EnableDeliveryReceipts makes /notify record a Receipt in the store at path
+// for every accepted notification, through one background writer goroutine.
+// The handler only enqueues, so a slow or stalled store can never hold up the
+// response a hook is waiting for. Tests leave it off unless they exercise
+// receipts directly.
+func (s *Server) EnableDeliveryReceipts(path string) {
+	ch := make(chan receiptEvent, receiptQueueCap)
+	s.receiptCh = ch
+	go runReceiptWriter(path, ch)
+}
+
+func runReceiptWriter(path string, ch <-chan receiptEvent) {
+	for ev := range ch {
+		if err := RecordReceipt(path, ev.host, ev.target, ev.at); err != nil {
+			log.Printf("WARN: failed to record delivery receipt: %v", err)
+		}
+	}
+}
+
+// queueReceipt hands one acceptance to the receipt writer without blocking.
+//
+// host must be the nonce-bound host, never env.Host: with an unbound nonce
+// env.Host is whatever the body claims, fine for display but not for a record
+// that doctor reports as "this host's hook fired". Unbound acceptances are kept
+// under the empty host, which no doctor --host lookup matches.
+func (s *Server) queueReceipt(host, target string) {
+	if s.receiptCh == nil {
 		return
 	}
-	if err := RecordReceipt(s.receiptsPath, env.Host, env.Target, time.Now().UTC()); err != nil {
-		log.Printf("WARN: failed to record delivery receipt: %v", err)
+	select {
+	case s.receiptCh <- receiptEvent{host: host, target: target, at: time.Now().UTC()}:
+	default:
+		log.Printf("WARN: delivery receipt dropped: writer queue full")
 	}
 }
 
@@ -682,7 +704,7 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 
 	s.enqueueEnvelope(env)
 	w.WriteHeader(http.StatusNoContent)
-	s.recordReceipt(env)
+	s.queueReceipt(boundHost, env.Target)
 }
 
 // parseNotifyRequest decodes the request body into a NotifyEnvelope.

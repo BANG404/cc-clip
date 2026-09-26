@@ -16,7 +16,13 @@ import (
 // "the hook actually fires" — the gap that leaves adapters no one can test on
 // real hardware marked unverified.
 
-const receiptStoreFile = "notify-receipts.json"
+// Each daemon owns one store file, named by its port. Two daemons can never
+// share a port, so no file ever has two writers and no cross-process lock is
+// needed; doctor merges every daemon's file when it reads (LoadAllReceipts).
+const (
+	receiptStorePrefix = "notify-receipts-"
+	receiptStoreSuffix = ".json"
+)
 
 // UnattributedTarget is recorded when a sender names no Target, or one this
 // daemon does not know (an older remote binary, a hand-rolled sender).
@@ -49,13 +55,44 @@ func NormalizeReceiptTarget(target string) string {
 	return UnattributedTarget
 }
 
-// ReceiptStorePath is where receipts persist, beside the other daemon state.
-func ReceiptStorePath() (string, error) {
+// ReceiptStorePath is where the daemon on port persists its receipts, beside
+// the other daemon state.
+func ReceiptStorePath(port int) (string, error) {
 	dir, err := token.TokenDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, receiptStoreFile), nil
+	return filepath.Join(dir, fmt.Sprintf("%s%d%s", receiptStorePrefix, port, receiptStoreSuffix)), nil
+}
+
+// LoadAllReceipts merges every daemon's store in dir, keeping the newest
+// acceptance per (Host, Target). An unreadable store is skipped and reported
+// in the error alongside whatever the others held.
+func LoadAllReceipts(dir string) ([]Receipt, error) {
+	paths, err := filepath.Glob(filepath.Join(dir, receiptStorePrefix+"*"+receiptStoreSuffix))
+	if err != nil {
+		return nil, fmt.Errorf("list receipt stores: %w", err)
+	}
+	newest := make(map[[2]string]Receipt)
+	var errs []error
+	for _, path := range paths {
+		receipts, err := LoadReceipts(path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, r := range receipts {
+			key := [2]string{r.Host, r.Target}
+			if cur, ok := newest[key]; !ok || r.LastAccepted.After(cur.LastAccepted) {
+				newest[key] = r
+			}
+		}
+	}
+	merged := make([]Receipt, 0, len(newest))
+	for _, r := range newest {
+		merged = append(merged, r)
+	}
+	return merged, errors.Join(errs...)
 }
 
 // LoadReceipts reads the receipt store. A missing file is no receipts, not an
@@ -75,12 +112,11 @@ func LoadReceipts(path string) ([]Receipt, error) {
 	return store.Receipts, nil
 }
 
-// RecordReceipt merges one acceptance into the store at path.
-//
-// It re-reads the file before writing rather than trusting memory: daemons on
-// different ports share this file, and a whole-store write from memory would
-// erase the other daemon's receipts. The newer timestamp wins per key. A store
-// that cannot be decoded is replaced rather than blocking every later receipt.
+// RecordReceipt merges one acceptance into the store at path. Only the owning
+// daemon's single receipt writer calls it (see Server.runReceiptWriter), so the
+// read-merge-write has no concurrent writer. The newer timestamp wins per key.
+// A store that cannot be decoded is replaced rather than blocking every later
+// receipt.
 func RecordReceipt(path, host, target string, at time.Time) error {
 	existing, err := LoadReceipts(path)
 	if err != nil {
