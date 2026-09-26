@@ -249,7 +249,7 @@ func TestPostNotificationDelivers(t *testing.T) {
 		Sound:    "Ping",
 		Verified: true,
 	}
-	if err := PostNotification(port, msg); err != nil {
+	if err := PostNotification(port, "", msg); err != nil {
 		t.Fatalf("PostNotification failed: %v", err)
 	}
 
@@ -268,6 +268,20 @@ func TestPostNotificationDelivers(t *testing.T) {
 	}
 	if !env.GenericMessage.Verified {
 		t.Fatal("Verified should propagate from trusted=true")
+	}
+}
+
+// TestPostNotificationSendsTheTarget pins the wire field that attributes the
+// daemon's delivery receipt to the sending Target.
+func TestPostNotificationSendsTheTarget(t *testing.T) {
+	port, srv := newNotifyServerWithChannel(t)
+
+	if err := PostNotification(port, "cursor", daemon.GenericMessagePayload{Title: "Cursor", Body: "done"}); err != nil {
+		t.Fatalf("PostNotification failed: %v", err)
+	}
+
+	if env := drainOne(t, srv.NotifyChannel()); env.Target != "cursor" {
+		t.Fatalf("target = %q, want cursor", env.Target)
 	}
 }
 

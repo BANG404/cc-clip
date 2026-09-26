@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/daemon"
@@ -61,6 +62,11 @@ func cmdServe() {
 	srv.SetTextWriter(daemon.NewClipboardTextWriter())
 	srv.SetVersion(version)
 	srv.EnableNoncePersistence()
+	if receiptsPath, err := daemon.ReceiptStorePath(listener.Addr().(*net.TCPAddr).Port); err != nil {
+		log.Printf("WARN: delivery receipts disabled: %v", err)
+	} else {
+		srv.EnableDeliveryReceipts(receiptsPath)
+	}
 	if loaded, err := srv.LoadPersistedNonces(); err != nil {
 		log.Printf("WARN: failed to load notification nonces: %v", err)
 	} else if loaded > 0 {

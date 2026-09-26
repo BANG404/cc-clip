@@ -78,7 +78,7 @@ func runCodexNotify(port int, args []string, stdin io.Reader) error {
 	if perr != nil {
 		return nil // fail-soft: invalid payload must not block the agent
 	}
-	_ = PostNotification(port, parsed)
+	_ = PostNotification(port, "codex", parsed)
 	return nil
 }
 
@@ -113,7 +113,7 @@ func runAntigravityNotify(port int, stdin io.Reader, stdout io.Writer) error {
 	}
 	parsed, perr := parseAntigravityNotifyPayload(string(b))
 	if perr == nil {
-		_ = PostNotification(port, parsed)
+		_ = PostNotification(port, "agy", parsed)
 	}
 	return nil
 }
@@ -131,7 +131,7 @@ func runOpencodeNotify(port int, stdin io.Reader) error {
 	if perr != nil {
 		return nil // fail-soft: invalid payload must not block opencode
 	}
-	_ = PostNotification(port, parsed)
+	_ = PostNotification(port, "opencode", parsed)
 	return nil
 }
 
@@ -151,6 +151,6 @@ func runCursorNotify(port int, stdin io.Reader) error {
 	if perr != nil {
 		return nil // fail-soft: invalid payload must not block Cursor
 	}
-	_ = PostNotification(port, parsed)
+	_ = PostNotification(port, "cursor", parsed)
 	return nil
 }

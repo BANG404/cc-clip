@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/session"
@@ -78,6 +79,8 @@ type Server struct {
 	addr              string
 	mux               *http.ServeMux
 	textWriter        ClipboardTextWriter // nil until SetTextWriter; POST /clipboard/text answers 501 without it
+	receiptCh         chan receiptEvent   // nil until EnableDeliveryReceipts; drained by the single receipt writer
+	receiptDrops      atomic.Int64        // receipts dropped on a full queue; reported by the writer, never the handler
 	version           string              // reported by /health when set via SetVersion (#22 P2)
 }
 
@@ -102,6 +105,57 @@ func NewServer(addr string, clipboard ClipboardReader, tokens *token.Manager, se
 	s.mux.HandleFunc("POST /notify", s.handleNotify)
 	s.mux.HandleFunc("POST /register-nonce", s.authMiddleware(s.handleRegisterNonce))
 	return s
+}
+
+// receiptQueueCap bounds receipts waiting for the writer. A full queue drops
+// the receipt, never the notification: receipts are diagnostics.
+const receiptQueueCap = 64
+
+type receiptEvent struct {
+	host, target string
+	at           time.Time
+}
+
+// EnableDeliveryReceipts makes /notify record a Receipt in the store at path
+// for every accepted notification, through one background writer goroutine.
+// The handler only enqueues, so a slow or stalled store can never hold up the
+// response a hook is waiting for. Tests leave it off unless they exercise
+// receipts directly.
+func (s *Server) EnableDeliveryReceipts(path string) {
+	ch := make(chan receiptEvent, receiptQueueCap)
+	s.receiptCh = ch
+	go s.runReceiptWriter(path, ch)
+}
+
+// runReceiptWriter is the only code that touches the store or logs about
+// receipts, so a stalled disk or log sink stalls it and nothing else.
+func (s *Server) runReceiptWriter(path string, ch <-chan receiptEvent) {
+	for ev := range ch {
+		if dropped := s.receiptDrops.Swap(0); dropped > 0 {
+			log.Printf("WARN: %d delivery receipts dropped: writer queue was full", dropped)
+		}
+		if err := RecordReceipt(path, ev.host, ev.target, ev.at); err != nil {
+			log.Printf("WARN: failed to record delivery receipt: %v", err)
+		}
+	}
+}
+
+// queueReceipt hands one acceptance to the receipt writer without blocking.
+//
+// host must be the nonce-bound host, never env.Host: with an unbound nonce
+// env.Host is whatever the body claims, fine for display but not for a record
+// that doctor reports as "this host's hook fired". Unbound acceptances are kept
+// under the empty host, which no doctor --host lookup matches.
+func (s *Server) queueReceipt(host, target string) {
+	if s.receiptCh == nil {
+		return
+	}
+	select {
+	case s.receiptCh <- receiptEvent{host: host, target: target, at: time.Now().UTC()}:
+	default:
+		// Not a log line: a blocked log sink would hold up the response again.
+		s.receiptDrops.Add(1)
+	}
 }
 
 // EnableNoncePersistence makes notification nonce mutations durable across
@@ -658,6 +712,7 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 
 	s.enqueueEnvelope(env)
 	w.WriteHeader(http.StatusNoContent)
+	s.queueReceipt(boundHost, env.Target)
 }
 
 // parseNotifyRequest decodes the request body into a NotifyEnvelope.
@@ -699,6 +754,9 @@ func (s *Server) parseClaudeHookPayload(body []byte) (NotifyEnvelope, error) {
 	if env == nil {
 		return NotifyEnvelope{}, fmt.Errorf("classifier returned nil")
 	}
+	// The content type is only ever sent by Claude's hooks (the managed runner
+	// and the cc-clip-hook fallback), so it attributes the Target by itself.
+	env.Target = "claude"
 	return *env, nil
 }
 
@@ -711,6 +769,7 @@ func (s *Server) parseGenericJSON(body []byte) (NotifyEnvelope, error) {
 		Host    string `json:"host"`
 		Sound   string `json:"sound"`
 		Trusted bool   `json:"trusted"`
+		Target  string `json:"target"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return NotifyEnvelope{}, fmt.Errorf("invalid JSON: %w", err)
@@ -723,6 +782,7 @@ func (s *Server) parseGenericJSON(body []byte) (NotifyEnvelope, error) {
 		Kind:      KindGenericMessage,
 		Source:    "generic",
 		Host:      payload.Host,
+		Target:    NormalizeReceiptTarget(payload.Target),
 		Timestamp: time.Now().UTC(),
 		GenericMessage: &GenericMessagePayload{
 			Title:    payload.Title,

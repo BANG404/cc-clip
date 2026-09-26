@@ -554,8 +554,15 @@ func cmdNotify() {
 		msg.Verified = true
 	}
 
+	// The --from-codex forms are Codex's own notify contract, so they attribute
+	// the delivery receipt; a hand-run notification stays unattributed.
+	target := ""
+	if *fromCodex != "" || *fromCodexStdin {
+		target = "codex"
+	}
+
 	port := getPort()
-	if err := postGenericNotification(port, msg); err != nil {
+	if err := postGenericNotification(port, target, msg); err != nil {
 		log.Fatalf("notify failed: %v", err)
 	}
 }
@@ -582,6 +589,6 @@ func parseCodexNotifyPayload(payload string) (daemon.GenericMessagePayload, erro
 // postGenericNotification sends a generic notification to the local cc-clip daemon.
 // It delegates to the shared plugin.PostNotification core so the wire bytes stay
 // identical across the notify subcommand and the plugin runner.
-func postGenericNotification(port int, msg daemon.GenericMessagePayload) error {
-	return plugin.PostNotification(port, msg)
+func postGenericNotification(port int, target string, msg daemon.GenericMessagePayload) error {
+	return plugin.PostNotification(port, target, msg)
 }
