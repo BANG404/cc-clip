@@ -20,6 +20,15 @@ var uninstallExchangeCapability func(string, string) error
 var uninstallCleanupHook func(string) error
 var uninstallNoReplaceHook func(string, string) error
 
+// requireAtomicExchange skips restore tests where the platform has no atomic
+// exchange: there a restore is refused with nothing changed, by design.
+func requireAtomicExchange(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("restore needs the atomic exchange available on Linux and Darwin")
+	}
+}
+
 // Instrument the restore syscall boundary, not the preflight or syscall result.
 // Recognizing Rename also lets this regression test run against 64728d6.
 func runUninstallExchangeProbe(t *testing.T) bool {
@@ -548,6 +557,7 @@ func assertAdoptedProgramRestored(t *testing.T, path, original string) {
 // Use a subprocess overlay to deny hard links without requiring a privileged
 // Linux fixture or a mounted filesystem. All other filesystem operations are real.
 func TestUninstallWithoutHardLinkSupport(t *testing.T) {
+	requireAtomicExchange(t)
 	if os.Getenv("CC_CLIP_TEST_DENY_LINK") != "1" {
 		sourcePath, err := filepath.Abs("install.go")
 		if err != nil {
@@ -688,6 +698,7 @@ func TestUninstallRestoresAdoptedWlCopyCompanion(t *testing.T) {
 
 func testUninstallRestoresWaylandProgram(t *testing.T, name string) {
 	t.Helper()
+	requireAtomicExchange(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, name)
 	original := "#!/bin/sh\necho CUSTOM-" + name + "\n"
@@ -1126,6 +1137,7 @@ func TestInstallReportsAnIncompleteRollback(t *testing.T) {
 
 // Uninstall restores the user's program; reinstall needs fresh consent to adopt it.
 func TestReinstallKeepsTheAdoptedProgramAsFallback(t *testing.T) {
+	requireAtomicExchange(t)
 	dir := t.TempDir()
 	victim := filepath.Join(dir, "xclip")
 	original := "#!/bin/sh\necho CUSTOM-FALLBACK\n"
@@ -1224,9 +1236,7 @@ func TestUninstallWaylandCapabilityRefusalChangesNothing(t *testing.T) {
 // interrupted after wl-paste was removed can be completed by running it again:
 // the missing main shim with no sidecar counts as already uninstalled.
 func TestUninstallResumesAfterACompanionRefusal(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("restore needs the atomic exchange available on Linux and Darwin")
-	}
+	requireAtomicExchange(t)
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	wlCopy := filepath.Join(dir, "wl-copy")
