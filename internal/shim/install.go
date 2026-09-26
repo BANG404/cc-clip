@@ -188,21 +188,34 @@ func InstallWithOptions(target Target, installDir string, port int, opts Install
 		wlCopyContent = WlCopyShim(port, realWlCopy)
 	}
 
-	// Every destination is cleared; now perform the side effects.
+	// Every destination is cleared; now perform the side effects. Each one
+	// registers its undo, and any later failure replays them newest first: an
+	// adopted program moved aside and never moved back is exactly the loss the
+	// adopt path promises not to cause.
+	var rollback []func()
+	fail := func(err error) (InstallResult, error) {
+		for i := len(rollback) - 1; i >= 0; i-- {
+			rollback[i]()
+		}
+		return InstallResult{}, err
+	}
 	if applyShim != nil {
 		if err := applyShim(); err != nil {
 			return InstallResult{}, err
 		}
+		rollback = append(rollback, func() { _ = os.Rename(shimDelegate, shimPath) })
 	}
 	if applyWlCopy != nil {
 		if err := applyWlCopy(); err != nil {
-			return InstallResult{}, err
+			return fail(err)
 		}
+		rollback = append(rollback, func() { _ = os.Rename(wlCopyDelegate, wlCopyPath) })
 	}
 
-	if err := writeShimFile(shimPath, shimContent); err != nil {
-		return InstallResult{}, err
+	if err := writeShim(shimPath, shimContent); err != nil {
+		return fail(err)
 	}
+	rollback = append(rollback, func() { _ = os.Remove(shimPath) })
 
 	// Wayland writes go through wl-copy, a separate binary from wl-paste, so
 	// the wayland target ships a write-side companion shim (#128 phase 2).
@@ -210,12 +223,11 @@ func InstallWithOptions(target Target, installDir string, port int, opts Install
 	// branch lives in the same script. Best-effort like the main shim: a
 	// missing real wl-copy still installs the shim (forward-only remote).
 	if wlCopyPath != "" {
-		if err := writeShimFile(wlCopyPath, wlCopyContent); err != nil {
+		if err := writeShim(wlCopyPath, wlCopyContent); err != nil {
 			// The pre-flight above passed, so this is an I/O failure rather
-			// than a refusal. Roll back the shim this call created so the
+			// than a refusal. Roll back everything this call changed so the
 			// deployment is not left half-applied.
-			_ = os.Remove(shimPath)
-			return InstallResult{}, err
+			return fail(err)
 		}
 	}
 
@@ -362,6 +374,10 @@ func prepareShimPath(path string, adoptForeign bool) (delegateTo string, apply f
 		"moved the existing %s to %s and pointed the shim at it there; nothing was deleted",
 		path, adopted)}, nil
 }
+
+// writeShim is the write InstallWithOptions performs; a variable only so tests
+// can fail one write and observe the rollback.
+var writeShim = writeShimFile
 
 // writeShimFile installs a shim at path.
 //

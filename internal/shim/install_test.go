@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -249,6 +250,48 @@ func TestInstallReplacesSymlinkWithoutTouchingTarget(t *testing.T) {
 // TestInstallAdoptsForeignFileOnConsent pins the recovery path for the case
 // that genuinely would destroy something: the file is moved aside, not deleted,
 // and the shim keeps delegating to it.
+// TestInstallRollsBackAdoptionsWhenACompanionWriteFails pins the adopt path's
+// promise on failure: a program moved aside is moved back, so a failed install
+// leaves the user's binaries where they were.
+func TestInstallRollsBackAdoptionsWhenACompanionWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	originals := map[string]string{
+		"wl-paste": "#!/bin/sh\nexec /usr/bin/wl-paste \"$@\"\n",
+		"wl-copy":  "#!/bin/sh\nexec /usr/bin/wl-copy \"$@\"\n",
+	}
+	for name, body := range originals {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	realWrite := writeShim
+	t.Cleanup(func() { writeShim = realWrite })
+	writeShim = func(path, content string) error {
+		if filepath.Base(path) == "wl-copy" {
+			return errors.New("injected write failure")
+		}
+		return realWrite(path, content)
+	}
+
+	if _, err := InstallWithOptions(TargetWlPaste, dir, 18339, InstallOptions{AdoptForeign: true}); err == nil {
+		t.Fatal("expected the injected wl-copy write failure to fail the install")
+	}
+
+	for name, body := range originals {
+		path := filepath.Join(dir, name)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s must be back at its original path: %v", name, err)
+		}
+		if string(got) != body {
+			t.Errorf("%s at its original path is not the user's program: %q", name, got)
+		}
+		if _, err := os.Lstat(path + AdoptedSuffix); !os.IsNotExist(err) {
+			t.Errorf("%s must not be left moved aside at %s", name, path+AdoptedSuffix)
+		}
+	}
+}
+
 func TestInstallAdoptsForeignFileOnConsent(t *testing.T) {
 	dir := t.TempDir()
 	victim := filepath.Join(dir, "xclip")
