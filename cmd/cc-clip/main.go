@@ -81,126 +81,139 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`cc-clip - Clipboard over SSH for Claude Code
+	fmt.Println(`cc-clip - paste images into remote AI coding agents over SSH, copy text back
+to your local clipboard, and get their notifications on your desktop.
+Works with Claude Code, Codex CLI, opencode, Cursor CLI and Antigravity.
 
 Usage:
   cc-clip <command> [flags]
 
-Daemon (local):
-  serve              Start local clipboard daemon
-    --port           Listen port (default: 18339, env: CC_CLIP_PORT)
-    --rotate-token   Force new token generation (ignore existing)
-  service            Manage system service (macOS/Windows)
-    install          Install and start service
-    uninstall        Stop and remove service
-    status           Show service status
-
-Remote:
-  install            Install xclip/wl-paste shim
-    --target         auto|xclip|wl-paste (default: auto)
-    --path           Install directory (default: ~/.local/bin)
-    --adopt-foreign-shim
-                     If a file cc-clip did not write occupies the shim path,
-                     move it to <path>.cc-clip-real and fall back to it there
-                     instead of refusing. Nothing is deleted.
-  uninstall          Remove shim
-    --host           Also clean up remote: Claude hooks/wrapper + PATH marker
-  paste              Fetch clipboard image and output path
-    --out-dir        Output directory (env: CC_CLIP_OUT_DIR)
-  send [<host>] [<file>]
-                      Upload local clipboard image or file to remote file path
-    --file           Upload this image file instead of reading the clipboard
-    --remote-dir     Remote directory (default: ~/.cache/cc-clip/uploads)
-    --paste          On Windows, paste the remote path into the active window
-    --delay-ms       Delay before Ctrl+Shift+V when --paste is used (default: 150)
-    --no-restore     Do not restore the original image clipboard after --paste
-  hotkey [<host>]    Windows global remote-paste hotkey listener
-    --remote-dir     Remote directory (default: ~/.cache/cc-clip/uploads)
-    --hotkey         Global hotkey to trigger remote paste (default: alt+shift+v)
-    --delay-ms       Delay before Ctrl+Shift+V after the hotkey (default: 150)
-    --enable-autostart   Start the hotkey automatically at login
-    --disable-autostart  Remove hotkey auto-start at login
-    --stop           Stop the background hotkey process
-    --status         Show hotkey process status
-
-One-command setup:
-  setup <host>       Full setup: deps, SSH config, daemon, deploy
+Set up and deploy (run on your local machine):
+  setup <host>       First-time setup: local deps, SSH config, daemon, deploy
     --port           Tunnel port (default: 18339)
-    --claude/--codex/--opencode/--agy/--cursor/--all   Deployment target (see "Deployment targets" below)
+    --claude/--codex/--opencode/--agy/--cursor/--all   Deployment target (see below)
     --use-remote-bin Use cc-clip from the remote PATH; skip binary upload
-    --auto-recover   Recover from v0.7.0 wrapper corruption (mutex with --token-only)
-
-Known hosts (per-user registry):
-  hosts list         Show hosts this machine has connected to (version, codex, last seen)
-  hosts forget HOST  Stop tracking a host locally (remote is not touched)
-
-Self-update (macOS/Linux):
-  update             Download and install the latest cc-clip release
-    --check          Only check whether a newer release exists; do not install
-    --force          Re-install even if already at target version; ignore
-                     conflict warnings from another daemon on the same port
-    --to VERSION     Install a specific version (e.g. v0.6.0) instead of latest
-
-Deploy (local -> remote):
-  connect <host>     Deploy cc-clip to remote and establish session
+    --local-bin      Path to pre-downloaded remote binary
+    --auto-recover   Recover from v0.7.0 wrapper corruption
+                     Other deploy flags (--force, --adopt-foreign-shim, --no-hooks,
+                     --no-notify) are connect-only: run connect after setup.
+  connect <host>     Deploy or redeploy cc-clip to a host (incremental)
     --port           Tunnel port (default: 18339)
+    --claude/--codex/--opencode/--agy/--cursor/--all   Deployment target (see below)
+    --force          Ignore remote state, full redeploy (use after cc-clip update)
+    --token-only     Only sync token, skip binary/shim deploy
     --local-bin      Path to pre-downloaded remote binary
     --use-remote-bin Use cc-clip from the remote PATH; skip binary upload
-    --force          Ignore remote state, full redeploy
-    --token-only     Only sync token, skip binary/shim deploy
+    --no-notify      Skip notification setup (nonce sync and agent hooks)
     --no-hooks       Persistently disable Claude Code hook injection (Claude target only)
     --hooks          Re-enable Claude Code hook injection (Claude target only)
     --auto-recover   Recover from v0.7.0 wrapper corruption (mutex with --token-only)
     --adopt-foreign-shim
-                     Let the remote install move a file it did not write aside
-                     (to <path>.cc-clip-real) instead of refusing
+                     If a regular file cc-clip did not write occupies xclip,
+                     wl-paste or wl-copy in ~/.local/bin, move it to <path>.cc-clip-real and fall back to it
+                     instead of refusing. cc-clip uninstall moves it back.
 
 Deployment targets (connect/setup; choose at most one selector):
     --claude         Claude Code: clipboard shim + claude-notify (default)
     --codex          Codex CLI ONLY: Xvfb + x11-bridge + codex-notify (no Claude shim)
     --opencode       opencode: clipboard shim + session.idle notify plugin
     --agy            Antigravity: agy-notify (alias --antigravity)
-    --cursor         Cursor CLI: clipboard shim only (requires DISPLAY or
-                     WAYLAND_DISPLAY in Cursor's shell; no notifications yet)
+    --cursor         Cursor CLI: clipboard shim + cursor-notify (paste requires
+                     DISPLAY or WAYLAND_DISPLAY in Cursor's shell)
     --all            Everything above
   With no selector: interactive menu on a TTY, or the {Claude} default on a
   non-TTY. v0.9.0 BREAKING: --codex no longer installs the Claude shim; use
   --all for the previous Claude+Codex behavior.
 
-Codex teardown:
-  uninstall --codex        Remove Codex support only (local)
-  uninstall --codex --host H  Remove Codex support on remote host
+  hosts list         Show hosts this machine has deployed to (version, codex, last seen)
+  hosts forget HOST  Stop tracking a host locally (remote is not touched)
+  uninstall --host H Remove managed Claude hooks/wrapper and the PATH marker from
+                     a remote host. Run "cc-clip uninstall" on the host first.
+  uninstall --codex --host H
+                     Remove Codex support from a remote host (bridge, Xvfb,
+                     notify entry, DISPLAY marker)
+  uninstall --codex  Remove Codex support on this machine
 
-Diagnostics:
-  status             Show component status
+Local daemon and diagnostics (run on your local machine):
+  serve              Run the clipboard daemon in the foreground
+    --port           Listen port (default: 18339, env: CC_CLIP_PORT)
+    --rotate-token   Force new token generation (ignore existing)
+  service            Run the daemon at login (macOS launchd / Windows logon)
+    install          Install and start service
+    uninstall        Stop and remove service
+    status           Show service status
+  status             Show daemon, port and token status
+    --port           Daemon port (default: 18339)
   doctor             Local health check
-  doctor --host H    Full end-to-end check via SSH
+  doctor --host H    Full end-to-end check via SSH, including when each agent
+                     last delivered a notification
+    --port           Daemon port (default: 18339)
+  update             Download and install the latest cc-clip release (macOS/Linux);
+                     then run "cc-clip connect <host> --force" for each host
+    --check          Only check whether a newer release exists; do not install
+    --force          Re-install even if already at target version; ignore
+                     conflict warnings from another daemon on the same port
+    --to VERSION     Install a specific version (e.g. v0.6.0) instead of latest
   version            Show version
+  help               Show this help
 
-Copy (remote -> local):
+Windows (run on your local Windows machine; experimental):
+  send [<host>] [<file>]
+                     Upload the clipboard image or a file to the host and print
+                     its remote path
+    --file           Upload this image file instead of reading the clipboard
+    --remote-dir     Remote directory (default: ~/.cache/cc-clip/uploads)
+    --paste          Paste the remote path into the active window
+    --delay-ms       Delay before Ctrl+Shift+V when --paste is used (default: 150)
+    --no-restore     Do not restore the original image clipboard after --paste
+  hotkey [<host>]    Global hotkey that runs send --paste in one keystroke
+    --remote-dir     Remote directory (default: ~/.cache/cc-clip/uploads)
+    --hotkey         Global hotkey to trigger remote paste (default: alt+shift+v)
+    --delay-ms       Delay before Ctrl+Shift+V after the hotkey (default: 150)
+    --no-restore     Leave the remote path on the clipboard instead of restoring
+                     the image
+    --enable-autostart   Start the hotkey automatically at login
+    --disable-autostart  Remove hotkey auto-start at login
+    --stop           Stop the background hotkey process
+    --status         Show hotkey process status
+
+On the remote host (copy, notify and paste need the tunnel of an open ssh session):
   copy               Read stdin and place it on the LOCAL machine's clipboard
-                     verbatim (run on the remote; needs the SSH tunnel). Piped
-                     text carries none of the soft-wrap newlines that mouse
-                     selection in a terminal injects:
+                     verbatim. Piped text carries none of the soft-wrap newlines
+                     that mouse selection in a terminal injects:
                        cat file.txt | cc-clip copy
     --port           Tunnel port (default: 18339)
-
-Notifications:
-  notify             Send a notification to the local daemon
+  uninstall          Remove the clipboard shim and restore a program adopted
+                     with --adopt-foreign-shim
+    --target         auto|xclip|wl-paste (default: auto; auto picks wl-paste
+                     only when WAYLAND_DISPLAY is set)
+    --path           Install directory (default: ~/.local/bin)
+  notify             Send a notification to your local desktop
     --title              Notification title
     --body               Notification body
     --urgency            Urgency level (default: 1)
     --sound              macOS notification sound (allowlisted)
-    --trusted            Suppress [unverified] prefix for trusted local config
+    --trusted            Suppress the [unverified] title prefix
     --from-codex         Parse Codex JSON payload (extracts last-assistant-message)
     --from-codex-stdin   Read Codex JSON payload from stdin (mutually exclusive with --from-codex)
-    --port               Daemon port (default: 18339, env: CC_CLIP_PORT)
+                         Port: set CC_CLIP_PORT (default: 18339); notify has no --port flag
+  paste              Save the local clipboard image to a remote file and print its path
+    --out-dir        Output directory (env: CC_CLIP_OUT_DIR)
+    --port           Tunnel port (default: 18339)
 
-Internal (used by deploy):
+Internal (run by cc-clip itself; you do not need these):
+  install            Install the xclip/wl-paste shim (connect runs it on the remote)
+    --target         auto|xclip|wl-paste (default: auto)
+    --path           Install directory (default: ~/.local/bin)
+    --port           Tunnel port the shim uses (default: 18339)
+    --adopt-foreign-shim
+                     Move a file cc-clip did not write to <path>.cc-clip-real
+                     instead of refusing. Nothing is deleted.
   x11-bridge         X11 clipboard bridge daemon (started by connect --codex)
     --display        X11 display (default: $DISPLAY)
     --port           cc-clip daemon port (default: 18339)
-  plugin run <name>  Run a notify adapter (claude-notify | codex-notify | agy-notify | opencode-notify)
+  plugin run <name>  Run a notify adapter (claude-notify | codex-notify |
+                     agy-notify | opencode-notify | cursor-notify);
                      reads agent hook JSON from stdin`)
 }
 
