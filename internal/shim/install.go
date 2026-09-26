@@ -394,19 +394,20 @@ func writeShimFile(path, content string) error {
 	return nil
 }
 
-// shimOwnerMarker is the exact line every shim this package installs carries in
+// ShimOwnerMarker is the exact line every shim this package installs carries in
 // its header. Ownership is keyed off it rather than off a bare "cc-clip"
 // substring: a user's own wrapper that merely MENTIONS cc-clip in a comment was
 // classified as ours and overwritten, which is the same data loss the install
 // guard exists to prevent. The line is stable across all three templates and
 // across every shim already deployed, so tightening it does not strand an
-// existing install from uninstall.
-const shimOwnerMarker = "# Installed by: cc-clip install"
+// existing install from uninstall. connect's remote presence probe reads the
+// same constants, so the two ownership decisions cannot drift apart.
+const ShimOwnerMarker = "# Installed by: cc-clip install"
 
-// shimHeaderBytes bounds the ownership read. The marker is in the first few
+// ShimHeaderBytes bounds the ownership read. The marker is in the first few
 // lines; reading further would only make a large foreign binary expensive to
 // classify.
-const shimHeaderBytes = 512
+const ShimHeaderBytes = 512
 
 func isOurShim(path string) bool {
 	// Lstat first: a symlink is never something this package wrote, and
@@ -420,9 +421,9 @@ func isOurShim(path string) bool {
 		return false
 	}
 	defer f.Close()
-	header := make([]byte, shimHeaderBytes)
+	header := make([]byte, ShimHeaderBytes)
 	n, _ := io.ReadFull(f, header)
-	return strings.Contains(string(header[:n]), shimOwnerMarker)
+	return strings.Contains(string(header[:n]), ShimOwnerMarker)
 }
 
 func CheckPathPriority(installDir string) (bool, string) {

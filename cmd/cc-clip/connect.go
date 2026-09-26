@@ -1226,8 +1226,14 @@ kill -0 $(cat %s/bridge.pid 2>/dev/null) 2>/dev/null && echo 'bridge:ok' || echo
 // It reads the file HEADER, not just line 1: the shim's first line is the #!
 // and the ownership marker sits on line 2, so a `head -1 | grep cc-clip` probe
 // never matched and every connect reinstalled the shim it had just verified.
+//
+// It applies the installer's own ownership rule (shim.ShimOwnerMarker within
+// shim.ShimHeaderBytes, never a symlink): a bare "cc-clip" substring accepted a
+// user's wrapper that merely mentions cc-clip, and connect then skipped
+// installing the shim over a file the installer itself would refuse to own.
 func shimPresenceCheck(shimPath string) string {
-	return fmt.Sprintf("test -f %s && head -c 256 %s | grep -qF cc-clip", shimPath, shimPath)
+	return fmt.Sprintf("test -f %s && ! test -L %s && head -c %d %s | grep -qF '%s'",
+		shimPath, shimPath, shim.ShimHeaderBytes, shimPath, shim.ShimOwnerMarker)
 }
 
 // failBridgeRestore ends the deploy when a bridge this run stopped could not be

@@ -42,6 +42,14 @@ func TestShimPresenceCheckRecognizesAnInstalledShim(t *testing.T) {
 		t.Fatal("probe accepted a file cc-clip did not write")
 	}
 
+	mentions := filepath.Join(dir, "xclip-wrapper")
+	if err := os.WriteFile(mentions, []byte("#!/bin/sh\n# my wrapper, works alongside cc-clip\nexec /usr/bin/xclip \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command(bash, "-c", shimPresenceCheck(mentions)).Run(); err == nil {
+		t.Fatal("probe accepted a user wrapper that only mentions cc-clip")
+	}
+
 	if err := exec.Command(bash, "-c", shimPresenceCheck(filepath.Join(dir, "absent"))).Run(); err == nil {
 		t.Fatal("probe accepted a missing file")
 	}
