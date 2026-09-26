@@ -9,8 +9,207 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+// Set only in isolated overlay subprocesses, never in production code.
+var uninstallExchangeHook func(string, string) error
+var uninstallExchangeCapability func(string, string) error
+
+// Instrument the restore syscall boundary, not the preflight or syscall result.
+// Recognizing Rename also lets this regression test run against 64728d6.
+func runUninstallExchangeProbe(t *testing.T) bool {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("atomic exchange is only supported on Darwin and Linux")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("CC_CLIP_TOKEN_DIR", filepath.Join(dir, "tokens"))
+	if os.Getenv("CC_CLIP_TEST_EXCHANGE") == "1" {
+		return true
+	}
+	sourcePath, err := filepath.Abs("install.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := "exchangePrograms(sidecar, path)"
+	delegate := "exchangePrograms(from, to)"
+	if !strings.Contains(string(source), call) {
+		call = "os.Rename(sidecar, path)"
+		delegate = "os.Rename(from, to)"
+	}
+	patched := strings.Replace(string(source), call, "uninstallTestExchange(sidecar, path)", 1)
+	patched += `
+func init() {
+	uninstallExchangeCapability = func(from, to string) error { return ` + delegate + ` }
+}
+func uninstallTestExchange(from, to string) error {
+	if uninstallExchangeHook != nil {
+		if err := uninstallExchangeHook(from, to); err != nil { return err }
+	}
+	return ` + delegate + `
+}
+`
+	replacement := filepath.Join(dir, "install.go")
+	if err := os.WriteFile(replacement, []byte(patched), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay, err := json.Marshal(map[string]any{"Replace": map[string]string{sourcePath: replacement}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlayPath := filepath.Join(dir, "overlay.json")
+	if err := os.WriteFile(overlayPath, overlay, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "test", "-race", "-overlay", overlayPath, ".", "-run", "^"+t.Name()+"$", "-count=1", "-v")
+	cmd.Env = append(os.Environ(), "CC_CLIP_TEST_EXCHANGE=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("%s", out)
+	if err != nil {
+		t.Fatalf("exchange probe: %v", err)
+	}
+	return false
+}
+
+func setupExchangeAdoption(t *testing.T) (dir, path, original string) {
+	t.Helper()
+	dir = t.TempDir()
+	path = filepath.Join(dir, "xclip")
+	original = "#!/bin/sh\necho ORIGINAL\n"
+	if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallWithOptions(TargetXclip, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { uninstallExchangeHook = nil })
+	return
+}
+
+func TestUninstallExchangeConcurrentReplacement(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	// Only this test requires native exchange. Probe disposable entries on
+	// the same temporary filesystem before scheduling the competing installer.
+	probeDir := t.TempDir()
+	from, to := filepath.Join(probeDir, "from"), filepath.Join(probeDir, "to")
+	for _, p := range []string{from, to} {
+		if err := os.WriteFile(p, []byte(p), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := uninstallExchangeCapability(from, to); err != nil {
+		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) {
+			t.Skipf("filesystem or kernel lacks atomic exchange: %v", err)
+		}
+		t.Fatal(err)
+	}
+	dir, path, original := setupExchangeAdoption(t)
+	sidecar := path + AdoptedSuffix
+	incoming := filepath.Join(dir, "incoming")
+	const newcomer = "#!/bin/sh\necho NEW-FOREIGN-PROGRAM\n"
+	if err := os.WriteFile(incoming, []byte(newcomer), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalInfo, _ := os.Stat(sidecar)
+	newcomerInfo, _ := os.Stat(incoming)
+	ready, done := make(chan struct{}), make(chan error, 1)
+	go func() { <-ready; done <- os.Rename(incoming, path) }()
+	uninstallExchangeHook = func(_, to string) error {
+		if !isOurShim(to) {
+			t.Error("shim missing before concurrent replacement")
+		}
+		close(ready)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	err := Uninstall(TargetXclip, dir)
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), sidecar) {
+		t.Errorf("conflict must report both preserved programs: %v", err)
+	}
+	for p, want := range map[string]struct {
+		data string
+		info os.FileInfo
+	}{path: {original, originalInfo}, sidecar: {newcomer, newcomerInfo}} {
+		data, readErr := os.ReadFile(p)
+		info, statErr := os.Stat(p)
+		if readErr != nil || statErr != nil || string(data) != want.data || !os.SameFile(want.info, info) {
+			t.Errorf("program not preserved at %s: got %q, read=%v stat=%v", p, data, readErr, statErr)
+		}
+	}
+	t.Logf("concurrent replacement: uninstall=%v", err)
+}
+
+func TestUninstallExchangeUnsupportedFallback(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	for _, fault := range []syscall.Errno{syscall.ENOSYS, syscall.EINVAL, syscall.ENOTSUP, syscall.EOPNOTSUPP} {
+		t.Run(fmt.Sprint(fault), func(t *testing.T) {
+			dir, path, original := setupExchangeAdoption(t)
+			before, _ := os.Stat(path + AdoptedSuffix)
+			calls := 0
+			uninstallExchangeHook = func(from, to string) error {
+				calls++
+				if !isOurShim(to) {
+					t.Error("fallback must not remove the shim before restoring")
+				}
+				return &os.LinkError{Op: "exchange", Old: from, New: to, Err: fault}
+			}
+			if err := Uninstall(TargetXclip, dir); err != nil {
+				t.Fatalf("unsupported exchange must fall back: %v", err)
+			}
+			assertAdoptedProgramRestored(t, path, original)
+			after, _ := os.Stat(path)
+			if calls != 1 || !os.SameFile(before, after) {
+				t.Fatalf("fallback did not preserve inode or attempt exchange once: calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestUninstallExchangeFailurePreservesBothEntries(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	for _, fault := range []syscall.Errno{syscall.EPERM, syscall.EXDEV} {
+		t.Run(fmt.Sprint(fault), func(t *testing.T) {
+			dir, path, original := setupExchangeAdoption(t)
+			sidecar := path + AdoptedSuffix
+			shimInfo, _ := os.Stat(path)
+			originalInfo, _ := os.Stat(sidecar)
+			uninstallExchangeHook = func(_, _ string) error { return fault }
+			err := Uninstall(TargetXclip, dir)
+			if !errors.Is(err, fault) || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), sidecar) {
+				t.Errorf("failure must identify retained entries and cause: %v", err)
+			}
+			for p, before := range map[string]os.FileInfo{path: shimInfo, sidecar: originalInfo} {
+				after, err := os.Stat(p)
+				if err != nil || !os.SameFile(before, after) {
+					t.Errorf("failed exchange changed %s: %v", p, err)
+				}
+			}
+			if !isOurShim(path) {
+				t.Error("failed exchange removed shim")
+			}
+			uninstallExchangeHook = nil
+			if err := Uninstall(TargetXclip, dir); err != nil {
+				t.Fatal(err)
+			}
+			assertAdoptedProgramRestored(t, path, original)
+		})
+	}
+}
 
 func assertAdoptedProgramRestored(t *testing.T, path, original string) {
 	t.Helper()

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 type Target string
@@ -312,15 +313,34 @@ func uninstallShim(path string) error {
 	}
 	sidecar := path + AdoptedSuffix
 	if restore {
-		// Recheck ownership immediately before replacing our shim. Residual
-		// race: a foreign file substituted between this check and Rename can
-		// be overwritten. Rename keeps the executable path continuously present
-		// and needs no hard-link support; a failed rename leaves both entries.
+		// Recheck ownership, then exchange entries without deleting either
+		// program or needing hard links. The displaced entry proves what was
+		// actually at path when the exchange committed.
 		if !isOurShim(path) {
 			return fmt.Errorf("cannot restore %s to %s: destination is not a cc-clip shim; program remains at %s", sidecar, path, sidecar)
 		}
-		if err := os.Rename(sidecar, path); err != nil {
-			return fmt.Errorf("failed to restore %s to %s; program remains at %s: %w", sidecar, path, sidecar, err)
+		err := exchangePrograms(sidecar, path)
+		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) ||
+			errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) {
+			// Older kernels, unsupported filesystems and other GOOS retain the
+			// hard-link-free rename fallback. Residual race: a foreign program
+			// substituted after the ownership check can be overwritten here.
+			if err := os.Rename(sidecar, path); err != nil {
+				return fmt.Errorf("failed to restore %s to %s; program remains at %s: %w", sidecar, path, sidecar, err)
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to exchange %s and %s; adopted program remains at %s: %w", sidecar, path, sidecar, err)
+		}
+		if !isOurShim(sidecar) {
+			// Another installer replaced path after our check. Keep the original
+			// restored at path and the newcomer at sidecar; do not swap back or
+			// delete either program, since that could clobber another update.
+			return fmt.Errorf("restore conflict: adopted program restored at %s; concurrent replacement preserved at %s; neither program deleted", path, sidecar)
+		}
+		if err := os.Remove(sidecar); err != nil {
+			return fmt.Errorf("adopted program restored at %s; failed to remove displaced shim at %s: %w", path, sidecar, err)
 		}
 		return nil
 	}
