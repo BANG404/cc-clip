@@ -107,8 +107,8 @@ func IsHealthy(session RemoteExecutor, stateDir string) (*State, bool) {
 	// the cookie exists.
 	//
 	// The check is a state marker this package writes when it starts a server
-	// under -auth, NOT a parse of the process argv. `ps -p` is not portable —
-	// busybox does not accept it — and an argv probe that errors on such a
+	// under -auth, NOT a parse of the process argv. The ps PID-selection flag
+	// is not supported by busybox, and an argv probe that errors on such a
 	// host reports every healthy instance as unhealthy, restarting Xvfb on
 	// every connect. The marker lives and dies with xvfb.pid, so it is exactly
 	// as trustworthy as the PID record already relied on here.
@@ -300,6 +300,12 @@ cat %[1]s/display`,
 	return &State{Display: display, PID: pid, AuthFile: authFile}, nil
 }
 
+// readPidCommShell reads the process name from Linux procfs. Remote hosts are
+// always Linux; reading comm avoids the incompatible PID flags in busybox ps.
+func readPidCommShell(pid int) string {
+	return fmt.Sprintf("cat /proc/%d/comm 2>/dev/null", pid)
+}
+
 // StopRemote stops a previously started Xvfb instance on the remote host.
 // It reads the PID from <stateDir>/xvfb.pid, verifies the process is
 // actually Xvfb (to avoid killing an unrelated process), and sends SIGTERM
@@ -325,9 +331,9 @@ func StopRemote(session RemoteExecutor, stateDir string) error {
 	}
 
 	// Step 2: Verify the process is Xvfb
-	comm, err := session.Exec(fmt.Sprintf("ps -p %d -o comm= 2>/dev/null", pid))
+	comm, err := session.Exec(readPidCommShell(pid))
 	if err != nil {
-		// Process not running: just clean up
+		// Process absent or unreadable: do not kill an unidentified process.
 		return CleanStale(session, stateDir)
 	}
 	comm = strings.TrimSpace(comm)

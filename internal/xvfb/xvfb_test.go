@@ -2,7 +2,9 @@ package xvfb
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -238,6 +240,102 @@ func TestCleanStale(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected rm -f command for state files, got: %v", m.execLog)
+	}
+}
+
+// TestReadPidCommShellNeedsNoPs probes a live process with only cat on PATH.
+func TestReadPidCommShellNeedsNoPs(t *testing.T) {
+	want, err := os.ReadFile("/proc/self/comm")
+	if err != nil {
+		t.Skip("no /proc; the remote side is always Linux")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skip("cat not available")
+	}
+	onlyCat := t.TempDir()
+	if err := os.Symlink(catPath, filepath.Join(onlyCat, "cat")); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bash, "-c", readPidCommShell(os.Getpid()))
+	cmd.Env = append(os.Environ(), "PATH="+onlyCat)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("probe failed without ps: %v", err)
+	}
+	if string(out) != string(want) {
+		t.Fatalf("probe read %q; want process name %q", out, want)
+	}
+}
+
+func TestStopRemoteIdentifiesXvfb(t *testing.T) {
+	for _, stillAlive := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stillAlive=%t", stillAlive), func(t *testing.T) {
+			m := newMockExecutor()
+			m.on("cat /tmp/test-xvfb/xvfb.pid", "12345", nil)
+			m.on("cat /proc/12345/comm", "Xvfb\n", nil)
+			m.on("kill 12345", "", nil)
+			m.on("sleep", "", nil)
+			aliveErr := fmt.Errorf("no such process")
+			if stillAlive {
+				aliveErr = nil
+			}
+			m.on("kill -0 12345", "", aliveErr)
+			m.on("kill -9 12345", "", nil)
+			m.on("rm -f", "", nil)
+
+			if err := StopRemote(m, "/tmp/test-xvfb"); err != nil {
+				t.Fatal(err)
+			}
+			commands := strings.Join(m.execLog, "\n")
+			if !strings.Contains(commands, "kill 12345") {
+				t.Fatalf("Xvfb was not terminated; commands:\n%s", commands)
+			}
+			if strings.Contains(commands, "kill -9 12345") != stillAlive {
+				t.Fatalf("unexpected SIGKILL behavior; commands:\n%s", commands)
+			}
+			if !strings.HasPrefix(m.execLog[len(m.execLog)-1], "rm -f") {
+				t.Fatalf("state was not cleaned after stopping; commands:\n%s", commands)
+			}
+		})
+	}
+}
+
+func TestStopRemoteUnidentifiedProcessIsNotKilled(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		comm    string
+		err     error
+		wantErr bool
+	}{
+		{name: "unreadable", comm: "Xvfb", err: fmt.Errorf("permission denied")},
+		{name: "empty", comm: "\n"},
+		{name: "unrelated", comm: "sleep\n", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newMockExecutor()
+			m.on("cat /tmp/test-xvfb/xvfb.pid", "12345", nil)
+			m.on("cat /proc/12345/comm", tt.comm, tt.err)
+			m.on("rm -f", "", nil)
+			err := StopRemote(m, "/tmp/test-xvfb")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("StopRemote error = %v, wantErr %t", err, tt.wantErr)
+			}
+			cleaned := false
+			for _, cmd := range m.execLog {
+				if strings.HasPrefix(cmd, "kill ") {
+					t.Fatalf("unidentified process received a kill command: %s", cmd)
+				}
+				cleaned = cleaned || strings.HasPrefix(cmd, "rm -f")
+			}
+			if cleaned == tt.wantErr {
+				t.Fatalf("state cleanup = %t, want %t", cleaned, !tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -513,7 +611,7 @@ func TestStartRemoteRetiresUnauthenticatedInstance(t *testing.T) {
 	// ...but it carries no authorization marker, so it must not be reused.
 	m.on("test -s "+AuthMarkerPath(stateDir), "", fmt.Errorf("no such file"))
 	// It is Xvfb, so it is ours to terminate.
-	m.on("ps -p 12345 -o comm=", "Xvfb", nil)
+	m.on("cat /proc/12345/comm", "Xvfb", nil)
 	m.on("kill 12345", "", nil)
 	m.on("sleep", "", nil)
 	m.on("rm -f", "", nil)
