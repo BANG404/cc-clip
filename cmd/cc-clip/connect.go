@@ -480,14 +480,11 @@ remote has a valid claude binary installed.
 		}
 		if needsShim {
 			fmt.Printf("[5/7] Installing shim...\n")
-			installCmd := fmt.Sprintf("%s install --port %d", remoteBin, port)
-			if opts.adoptForeignShim {
-				installCmd += " --adopt-foreign-shim"
-			}
+			installCmd := remoteInstallCommand(remoteBin, port, opts.adoptForeignShim)
 			out, err := session.Exec(installCmd)
 			if err != nil {
 				// Shim might already exist, try uninstall then install
-				if uninstallOut, uninstallErr := session.Exec(fmt.Sprintf("%s uninstall", remoteBin)); uninstallErr != nil {
+				if uninstallOut, uninstallErr := session.Exec(fmt.Sprintf("%s uninstall 2>&1", remoteBin)); uninstallErr != nil {
 					log.Printf("      warning: cleanup before install retry failed: %s: %v", uninstallOut, uninstallErr)
 				}
 				out, err = session.Exec(installCmd)
@@ -1218,6 +1215,22 @@ kill -0 $(cat %s/bridge.pid 2>/dev/null) 2>/dev/null && echo 'bridge:ok' || echo
 		return fmt.Errorf("bridge process died immediately after start")
 	}
 	return nil
+}
+
+// remoteInstallCommand is the remote `cc-clip install` invocation connect runs.
+//
+// It folds stderr into stdout because SSHSession.Exec captures stdout only,
+// and the remote install reports a refusal through log.Fatalf on stderr: the
+// refusal text, including the --adopt-foreign-shim hint connect checks for,
+// never reached connect, and users saw "remote install failed: : exit status 1".
+// A successful install writes only to stdout, so the output connect parses on
+// success is unchanged.
+func remoteInstallCommand(remoteBin string, port int, adoptForeign bool) string {
+	cmd := fmt.Sprintf("%s install --port %d", remoteBin, port)
+	if adoptForeign {
+		cmd += " " + shim.AdoptFlagHint
+	}
+	return cmd + " 2>&1"
 }
 
 // shimPresenceCheck is the remote command that reports whether a cc-clip shim

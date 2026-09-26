@@ -113,3 +113,35 @@ func TestBridgeDisplayPortReadsRunningArgs(t *testing.T) {
 		t.Fatal("argv without a port must not be treated as identifiable")
 	}
 }
+
+// TestRemoteInstallCommandSurfacesTheRefusal runs the install command connect
+// sends against a stand-in remote binary that refuses the way cmdInstall does
+// (log.Fatalf: stderr, exit 1), capturing stdout only as SSHSession.Exec does.
+// Before stderr was folded in, the --adopt-foreign-shim hint never reached
+// connect and the user saw only "remote install failed: : exit status 1".
+func TestRemoteInstallCommandSurfacesTheRefusal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the command runs in a remote POSIX shell")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	fake := filepath.Join(t.TempDir(), "cc-clip")
+	refusal := "install failed: /home/u/.local/bin/xclip already exists and was not written by cc-clip. Re-run with " + shim.AdoptFlagHint
+	script := "#!/bin/sh\necho '" + refusal + "' >&2\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bash, "-c", remoteInstallCommand(fake, 18339, false)).Output()
+	if err == nil {
+		t.Fatal("the stand-in refusal must still fail the command")
+	}
+	if !strings.Contains(string(out), shim.AdoptFlagHint) {
+		t.Fatalf("stdout-only capture lost the refusal; got %q", out)
+	}
+	if !strings.Contains(remoteInstallCommand(fake, 18339, true), shim.AdoptFlagHint) {
+		t.Fatal("the adopt flag must be forwarded when the user passed it")
+	}
+}
