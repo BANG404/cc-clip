@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -254,26 +255,225 @@ func Uninstall(target Target, installDir string) error {
 	binName := string(resolved)
 	shimPath := filepath.Join(installDir, binName)
 
-	if !isOurShim(shimPath) {
-		return fmt.Errorf("%s is not a cc-clip shim (or does not exist)", shimPath)
-	}
-
-	if err := os.Remove(shimPath); err != nil {
-		return fmt.Errorf("failed to remove shim: %w", err)
-	}
-
-	// The wayland install ships a wl-copy companion; remove it with its
-	// wl-paste sibling, but only when it is genuinely ours.
+	paths := []string{shimPath}
 	if resolved == TargetWlPaste {
-		wlCopyPath := filepath.Join(installDir, "wl-copy")
-		if isOurShim(wlCopyPath) {
-			if err := os.Remove(wlCopyPath); err != nil {
-				return fmt.Errorf("failed to remove wl-copy shim: %w", err)
-			}
+		paths = append(paths, filepath.Join(installDir, "wl-copy"))
+	}
+	// Inspect EVERY destination and sidecar before changing ANY entry. A
+	// companion conflict must not strand the main shim halfway uninstalled.
+	var pending []string
+	restores := make(map[string]bool)
+	needsExchange := false
+	mainGone := false
+	for i, path := range paths {
+		if i == 0 && uninstallAlreadyDone(path) {
+			// A resumed uninstall: an earlier run removed the main shim and
+			// then refused on the companion. Continue with the companion.
+			mainGone = true
+			continue
+		}
+		remove, restore, err := preflightUninstallShim(path, i != 0)
+		if err != nil {
+			return err
+		}
+		if remove {
+			pending = append(pending, path)
+			restores[path] = restore
+			needsExchange = needsExchange || restore
 		}
 	}
-
+	if len(pending) == 0 {
+		if mainGone {
+			return fmt.Errorf("%s is not a cc-clip shim (or does not exist)", shimPath)
+		}
+		return nil
+	}
+	// Establish every capability the batch needs before touching any shared
+	// name, so an unsupported kernel or filesystem refuses the WHOLE request
+	// with nothing changed rather than after an earlier path was processed.
+	if err := probeUninstallCapabilities(installDir, needsExchange); err != nil {
+		return batchRefused(pending, restores, err)
+	}
+	for _, path := range pending {
+		if err := uninstallShim(path); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// batchRefused explains a refusal that happened before any entry changed,
+// naming where every shim and adopted program still is.
+func batchRefused(pending []string, restores map[string]bool, cause error) error {
+	cause = fmt.Errorf("nothing was changed: %w", cause)
+	errs := make([]error, 0, len(pending))
+	for _, path := range pending {
+		if restores[path] {
+			errs = append(errs, restoreRefused(path, path+AdoptedSuffix, cause))
+			continue
+		}
+		errs = append(errs, fmt.Errorf("safe uninstall refused: shim left untouched at %s: %w", path, cause))
+	}
+	return errors.Join(errs...)
+}
+
+// uninstallAlreadyDone reports a main path with nothing left to undo: no entry
+// at the path and no adopted sidecar. It is what a resumed Wayland uninstall
+// finds after an earlier run removed wl-paste and refused on wl-copy.
+func uninstallAlreadyDone(path string) bool {
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return false
+	}
+	_, err := os.Lstat(path + AdoptedSuffix)
+	return os.IsNotExist(err)
+}
+
+// probeUninstallCapabilities runs the no-replace rename and, when a restore is
+// due, the atomic exchange on two private entries in dir. Every primitive the
+// batch will use is proven on this directory's filesystem before any shared
+// program pathname is touched.
+func probeUninstallCapabilities(dir string, needsExchange bool) error {
+	a, err := os.CreateTemp(dir, ".cc-clip-uninstall-probe-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(a.Name()) // Private, never a shared program pathname.
+	if err := a.Close(); err != nil {
+		return err
+	}
+	b, err := os.CreateTemp(dir, ".cc-clip-uninstall-probe-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(b.Name())
+	if err := b.Close(); err != nil {
+		return err
+	}
+	moved := b.Name() + ".moved"
+	defer os.Remove(moved)
+	if err := renameProgramNoReplace(b.Name(), moved); err != nil {
+		return fmt.Errorf("no-replace rename unsupported here: %w", err)
+	}
+	if needsExchange {
+		if err := exchangePrograms(a.Name(), moved); err != nil {
+			return fmt.Errorf("atomic exchange unsupported here: %w", err)
+		}
+	}
+	return nil
+}
+
+// An optional companion without a sidecar may be absent or foreign; leave it
+// alone. A sidecar of ANY type must be inspected, not hidden by adoptedDelegate.
+func preflightUninstallShim(path string, optional bool) (remove, restore bool, err error) {
+	sidecar := path + AdoptedSuffix
+	info, err := os.Lstat(sidecar)
+	if err != nil && !os.IsNotExist(err) {
+		return false, false, fmt.Errorf("failed to inspect adopted program at %s; left untouched: %w", sidecar, err)
+	}
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return false, false, fmt.Errorf("cannot restore %s to %s: sidecar is not a regular file; left untouched", sidecar, path)
+		}
+		restore = true
+	}
+	if !isOurShim(path) {
+		if restore {
+			return false, false, fmt.Errorf("cannot restore %s to %s: destination is not a cc-clip shim; program remains at %s", sidecar, path, sidecar)
+		}
+		if optional {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("%s is not a cc-clip shim (or does not exist)", path)
+	}
+	return true, restore, nil
+}
+
+// uninstallShim defends against concurrent writers on the shared names path
+// and path+AdoptedSuffix. Our private random names, process kill mid-operation,
+// and filesystem-level faults after the exchange commits are out of scope.
+//
+// Across a Wayland batch the guarantee is about programs, not our shims: a
+// refusal never deletes or overwrites any program on a shared name, and a
+// refusal found by the up-front capability probe changes nothing at all. A
+// concurrent writer that makes wl-copy refuse after wl-paste was processed
+// can leave our own wl-paste shim removed; running uninstall again completes
+// the rest (see uninstallAlreadyDone).
+// Only a shim inspected at a private name may be unlinked; shared names are
+// never unlinked or overwritten based on a preceding ownership check.
+func uninstallShim(path string) error {
+	_, restore, err := preflightUninstallShim(path, false)
+	if err != nil {
+		return err
+	}
+	sidecar := path + AdoptedSuffix
+	quarantine, err := prepareUninstallQuarantine(path)
+	if err != nil {
+		if restore {
+			return restoreRefused(path, sidecar, err)
+		}
+		return fmt.Errorf("safe uninstall refused; destination left untouched at %s: %w", path, err)
+	}
+	displaced := path
+	location := fmt.Sprintf("destination was at %s", path)
+	if restore {
+		if !isOurShim(path) {
+			return restoreRefused(path, sidecar, fmt.Errorf("destination is not a cc-clip shim"))
+		}
+		if err := exchangePrograms(sidecar, path); err != nil {
+			return restoreRefused(path, sidecar, err)
+		}
+		displaced = sidecar
+		location = fmt.Sprintf("adopted entry restored at %s", path)
+	}
+	// Move first, inspect second. A concurrent sidecar replacement travels to
+	// quarantine instead of being deleted using the displaced shim's identity.
+	if err := renameProgramNoReplace(displaced, quarantine); err != nil {
+		return fmt.Errorf("%s; could not move %s to quarantine %s; both names left untouched by the move; no entry deleted (inspect shared names for concurrent changes): %w", location, displaced, quarantine, err)
+	}
+	if !isOurShim(quarantine) {
+		if err := renameProgramNoReplace(quarantine, displaced); err != nil {
+			return fmt.Errorf("%s; concurrent entry preserved at %s; could not return it to %s (destination left untouched); no entry deleted: %w", location, quarantine, displaced, err)
+		}
+		return fmt.Errorf("%s; concurrent entry preserved at %s; no entry deleted", location, displaced)
+	}
+	if err := os.Remove(quarantine); err != nil {
+		return fmt.Errorf("%s; failed to remove displaced shim at %s: %w", location, quarantine, err)
+	}
+	return nil
+}
+
+// Probe the no-replace primitive on private entries in the same directory
+// BEFORE exchanging shared names. Unsupported kernels/filesystems must leave
+// the shim and adopted program untouched, never attempt a clobbering fallback.
+func prepareUninstallQuarantine(path string) (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	quarantine := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s.cc-clip-uninstall-%x", filepath.Base(path), nonce))
+	probe, err := os.CreateTemp(filepath.Dir(path), ".cc-clip-uninstall-probe-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(probe.Name()) // Private, never a shared program pathname.
+	if err := probe.Close(); err != nil {
+		return "", err
+	}
+	if err := renameProgramNoReplace(probe.Name(), quarantine); err != nil {
+		return "", err
+	}
+	if err := os.Remove(quarantine); err != nil {
+		return "", err
+	}
+	return quarantine, nil
+}
+
+func restoreRefused(path, sidecar string, cause error) error {
+	if !isOurShim(path) {
+		return fmt.Errorf("safe restore refused: destination at %s is no longer a cc-clip shim; this operation left %s and %s untouched; inspect and preserve both entries before any manual restore: %w", path, path, sidecar, cause)
+	}
+	return fmt.Errorf("safe restore refused: shim is still at %s; user's program is at %s unless concurrently changed; inspect both entries and verify the destination is still our shim before removing it manually, then restore with: mv %s %s: %w",
+		path, sidecar, shSingleQuote(sidecar), shSingleQuote(path), cause)
 }
 
 // AdoptedSuffix is appended to a foreign file moved aside by an adopting
