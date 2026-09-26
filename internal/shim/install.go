@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -8,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 type Target string
@@ -305,49 +305,85 @@ func preflightUninstallShim(path string, optional bool) (remove, restore bool, e
 	return true, restore, nil
 }
 
-// uninstallShim removes only our shim and restores any adopted regular file.
+// uninstallShim defends against concurrent writers on the shared names path
+// and path+AdoptedSuffix. Our private random names, process kill mid-operation,
+// and filesystem-level faults after the exchange commits are out of scope.
+// Only a shim inspected at a private name may be unlinked; shared names are
+// never unlinked or overwritten based on a preceding ownership check.
 func uninstallShim(path string) error {
 	_, restore, err := preflightUninstallShim(path, false)
 	if err != nil {
 		return err
 	}
 	sidecar := path + AdoptedSuffix
-	if restore {
-		// Recheck ownership, then exchange entries without deleting either
-		// program or needing hard links. The displaced entry proves what was
-		// actually at path when the exchange committed.
-		if !isOurShim(path) {
-			return fmt.Errorf("cannot restore %s to %s: destination is not a cc-clip shim; program remains at %s", sidecar, path, sidecar)
+	quarantine, err := prepareUninstallQuarantine(path)
+	if err != nil {
+		if restore {
+			return restoreRefused(path, sidecar, err)
 		}
-		err := exchangePrograms(sidecar, path)
-		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) ||
-			errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) {
-			// Older kernels, unsupported filesystems and other GOOS retain the
-			// hard-link-free rename fallback. Residual race: a foreign program
-			// substituted after the ownership check can be overwritten here.
-			if err := os.Rename(sidecar, path); err != nil {
-				return fmt.Errorf("failed to restore %s to %s; program remains at %s: %w", sidecar, path, sidecar, err)
-			}
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("failed to exchange %s and %s; adopted program remains at %s: %w", sidecar, path, sidecar, err)
-		}
-		if !isOurShim(sidecar) {
-			// Another installer replaced path after our check. Keep the original
-			// restored at path and the newcomer at sidecar; do not swap back or
-			// delete either program, since that could clobber another update.
-			return fmt.Errorf("restore conflict: adopted program restored at %s; concurrent replacement preserved at %s; neither program deleted", path, sidecar)
-		}
-		if err := os.Remove(sidecar); err != nil {
-			return fmt.Errorf("adopted program restored at %s; failed to remove displaced shim at %s: %w", path, sidecar, err)
-		}
-		return nil
+		return fmt.Errorf("safe uninstall refused; destination left untouched at %s: %w", path, err)
 	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("failed to remove shim %s (any adopted program remains at %s): %w", path, sidecar, err)
+	displaced := path
+	location := fmt.Sprintf("destination was at %s", path)
+	if restore {
+		if !isOurShim(path) {
+			return restoreRefused(path, sidecar, fmt.Errorf("destination is not a cc-clip shim"))
+		}
+		if err := exchangePrograms(sidecar, path); err != nil {
+			return restoreRefused(path, sidecar, err)
+		}
+		displaced = sidecar
+		location = fmt.Sprintf("adopted entry restored at %s", path)
+	}
+	// Move first, inspect second. A concurrent sidecar replacement travels to
+	// quarantine instead of being deleted using the displaced shim's identity.
+	if err := renameProgramNoReplace(displaced, quarantine); err != nil {
+		return fmt.Errorf("%s; could not move %s to quarantine %s; both names left untouched by the move; no entry deleted (inspect shared names for concurrent changes): %w", location, displaced, quarantine, err)
+	}
+	if !isOurShim(quarantine) {
+		if err := renameProgramNoReplace(quarantine, displaced); err != nil {
+			return fmt.Errorf("%s; concurrent entry preserved at %s; could not return it to %s (destination left untouched); no entry deleted: %w", location, quarantine, displaced, err)
+		}
+		return fmt.Errorf("%s; concurrent entry preserved at %s; no entry deleted", location, displaced)
+	}
+	if err := os.Remove(quarantine); err != nil {
+		return fmt.Errorf("%s; failed to remove displaced shim at %s: %w", location, quarantine, err)
 	}
 	return nil
+}
+
+// Probe the no-replace primitive on private entries in the same directory
+// BEFORE exchanging shared names. Unsupported kernels/filesystems must leave
+// the shim and adopted program untouched, never attempt a clobbering fallback.
+func prepareUninstallQuarantine(path string) (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	quarantine := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s.cc-clip-uninstall-%x", filepath.Base(path), nonce))
+	probe, err := os.CreateTemp(filepath.Dir(path), ".cc-clip-uninstall-probe-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(probe.Name()) // Private, never a shared program pathname.
+	if err := probe.Close(); err != nil {
+		return "", err
+	}
+	if err := renameProgramNoReplace(probe.Name(), quarantine); err != nil {
+		return "", err
+	}
+	if err := os.Remove(quarantine); err != nil {
+		return "", err
+	}
+	return quarantine, nil
+}
+
+func restoreRefused(path, sidecar string, cause error) error {
+	if !isOurShim(path) {
+		return fmt.Errorf("safe restore refused: destination at %s is no longer a cc-clip shim; this operation left %s and %s untouched; inspect and preserve both entries before any manual restore: %w", path, path, sidecar, cause)
+	}
+	return fmt.Errorf("safe restore refused: shim is still at %s; user's program is at %s unless concurrently changed; inspect both entries and verify the destination is still our shim before removing it manually, then restore with: mv %s %s: %w",
+		path, sidecar, shSingleQuote(sidecar), shSingleQuote(path), cause)
 }
 
 // AdoptedSuffix is appended to a foreign file moved aside by an adopting

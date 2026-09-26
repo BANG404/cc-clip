@@ -4,8 +4,11 @@ package shim
 
 import "syscall"
 
-// Request uninstallShim's os.Rename fallback on platforms without an exchange
-// primitive. That fallback retains the documented concurrent-replacement race.
+// Refuse restoration on platforms without safe directory-entry primitives.
 func exchangePrograms(_, _ string) error {
+	return syscall.ENOSYS
+}
+
+func renameProgramNoReplace(_, _ string) error {
 	return syscall.ENOSYS
 }

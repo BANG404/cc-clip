@@ -16,6 +16,8 @@ import (
 // Set only in isolated overlay subprocesses, never in production code.
 var uninstallExchangeHook func(string, string) error
 var uninstallExchangeCapability func(string, string) error
+var uninstallCleanupHook func(string) error
+var uninstallNoReplaceHook func(string, string) error
 
 // Instrument the restore syscall boundary, not the preflight or syscall result.
 // Recognizing Rename also lets this regression test run against 64728d6.
@@ -49,7 +51,28 @@ func runUninstallExchangeProbe(t *testing.T) bool {
 		delegate = "os.Rename(from, to)"
 	}
 	patched := strings.Replace(string(source), call, "uninstallTestExchange(sidecar, path)", 1)
+	for _, cleanup := range []string{"os.Remove(sidecar)", "os.Remove(quarantine)"} {
+		patched = strings.ReplaceAll(patched, cleanup, strings.Replace(cleanup, "os.Remove", "uninstallTestCleanup", 1))
+	}
+	if strings.Contains(patched, "renameProgramNoReplace(") {
+		patched = strings.ReplaceAll(patched, "renameProgramNoReplace(", "uninstallTestNoReplace(")
+		patched += `
+func uninstallTestNoReplace(from, to string) error {
+	if uninstallNoReplaceHook != nil {
+		if err := uninstallNoReplaceHook(from, to); err != nil { return err }
+	}
+	return renameProgramNoReplace(from, to)
+}
+`
+	}
 	patched += `
+func uninstallTestCleanup(path string) error {
+	if uninstallCleanupHook != nil {
+		if err := uninstallCleanupHook(path); err != nil { return err }
+	}
+	return os.Remove(path)
+}
+
 func init() {
 	uninstallExchangeCapability = func(from, to string) error { return ` + delegate + ` }
 }
@@ -114,7 +137,7 @@ func setupExchangeAdoption(t *testing.T) (dir, path, original string) {
 	if _, err := InstallWithOptions(TargetXclip, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { uninstallExchangeHook = nil })
+	t.Cleanup(func() { uninstallExchangeHook = nil; uninstallCleanupHook = nil; uninstallNoReplaceHook = nil })
 	return
 }
 
@@ -175,30 +198,290 @@ func TestUninstallExchangeConcurrentReplacement(t *testing.T) {
 	t.Logf("concurrent replacement: uninstall=%v", err)
 }
 
-func TestUninstallExchangeUnsupportedFallback(t *testing.T) {
+// The writer commits at the final removal boundary, after ownership inspection.
+func TestUninstallCleanupConcurrentSidecarReplacement(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	dir, path, original := setupExchangeAdoption(t)
+	sidecar := path + AdoptedSuffix
+	incoming := filepath.Join(dir, "incoming-sidecar")
+	const newcomer = "#!/bin/sh\necho NEW-FOREIGN-PROGRAM\n"
+	if err := os.WriteFile(incoming, []byte(newcomer), 0755); err != nil {
+		t.Fatal(err)
+	}
+	newInfo, err := os.Stat(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	uninstallCleanupHook = func(p string) error {
+		// The capability probe also removes a private, empty quarantine.
+		if !isOurShim(p) {
+			return nil
+		}
+		calls++
+		ready, done := make(chan struct{}), make(chan error, 1)
+		go func() { <-ready; done <- os.Rename(incoming, sidecar) }()
+		close(ready)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	err = Uninstall(TargetXclip, dir)
+	got, readErr := os.ReadFile(path)
+	info, statErr := os.Lstat(sidecar)
+	sidecarData, sidecarErr := os.ReadFile(sidecar)
+	t.Logf("uninstall=%v; path=%q; sidecar=%q; sidecarRead=%v; cleanupCalls=%d", err, got, sidecarData, sidecarErr, calls)
+	if calls != 1 {
+		t.Errorf("expected one cleanup boundary, got %d", calls)
+	}
+	if statErr != nil || !os.SameFile(newInfo, info) || string(sidecarData) != newcomer {
+		t.Errorf("NEW REGRESSION: concurrent sidecar update deleted: %v", statErr)
+	}
+	if readErr != nil || string(got) != original {
+		t.Errorf("restored original changed: %q %v", got, readErr)
+	}
+}
+
+func TestUninstallUnsupportedExchangeConcurrentNewcomer(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	for _, f := range []struct {
+		name  string
+		errno syscall.Errno
+	}{
+		{"ENOSYS", syscall.ENOSYS}, {"EINVAL", syscall.EINVAL}, {"ENOTSUP", syscall.ENOTSUP}, {"EOPNOTSUPP", syscall.EOPNOTSUPP},
+	} {
+		t.Run(f.name, func(t *testing.T) {
+			dir, path, original := setupExchangeAdoption(t)
+			sidecar := path + AdoptedSuffix
+			incoming := filepath.Join(dir, "incoming")
+			const newcomer = "#!/bin/sh\necho NEW-FOREIGN-PROGRAM\n"
+			if err := os.WriteFile(incoming, []byte(newcomer), 0755); err != nil {
+				t.Fatal(err)
+			}
+			originalInfo, _ := os.Stat(sidecar)
+			newInfo, _ := os.Stat(incoming)
+			uninstallExchangeHook = func(from, to string) error {
+				if !isOurShim(to) {
+					t.Error("missing initial shim")
+				}
+				ready, done := make(chan struct{}), make(chan error, 1)
+				go func() { <-ready; done <- os.Rename(incoming, to) }()
+				close(ready)
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				return &os.LinkError{Op: "exchange", Old: from, New: to, Err: f.errno}
+			}
+			err := Uninstall(TargetXclip, dir)
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), sidecar) {
+				t.Errorf("expected conflict naming both paths: %v", err)
+			}
+			if err != nil && (strings.Contains(err.Error(), "mv ") || strings.Contains(err.Error(), "removing the shim")) {
+				t.Errorf("foreign destination must not receive destructive shim-removal guidance: %v", err)
+			}
+			for p, want := range map[string]struct {
+				data string
+				info os.FileInfo
+			}{
+				path: {newcomer, newInfo}, sidecar: {original, originalInfo},
+			} {
+				data, readErr := os.ReadFile(p)
+				info, statErr := os.Lstat(p)
+				t.Logf("uninstall=%v; %s=%q; read=%v stat=%v", err, p, data, readErr, statErr)
+				if readErr != nil || statErr != nil || string(data) != want.data || !os.SameFile(want.info, info) {
+					t.Errorf("program inode lost at %s", p)
+				}
+			}
+		})
+	}
+}
+
+func TestUninstallExchangeUnsupportedRefusal(t *testing.T) {
 	if !runUninstallExchangeProbe(t) {
 		return
 	}
 	for _, fault := range []syscall.Errno{syscall.ENOSYS, syscall.EINVAL, syscall.ENOTSUP, syscall.EOPNOTSUPP} {
 		t.Run(fmt.Sprint(fault), func(t *testing.T) {
-			dir, path, original := setupExchangeAdoption(t)
-			before, _ := os.Stat(path + AdoptedSuffix)
+			dir, path, _ := setupExchangeAdoption(t)
+			sidecar := path + AdoptedSuffix
+			shimInfo, _ := os.Stat(path)
+			originalInfo, _ := os.Stat(sidecar)
 			calls := 0
 			uninstallExchangeHook = func(from, to string) error {
 				calls++
-				if !isOurShim(to) {
-					t.Error("fallback must not remove the shim before restoring")
-				}
 				return &os.LinkError{Op: "exchange", Old: from, New: to, Err: fault}
 			}
-			if err := Uninstall(TargetXclip, dir); err != nil {
-				t.Fatalf("unsupported exchange must fall back: %v", err)
+			err := Uninstall(TargetXclip, dir)
+			if !errors.Is(err, fault) || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), sidecar) {
+				t.Errorf("unsupported exchange must refuse and identify retained entries: %v", err)
 			}
-			assertAdoptedProgramRestored(t, path, original)
-			after, _ := os.Stat(path)
-			if calls != 1 || !os.SameFile(before, after) {
-				t.Fatalf("fallback did not preserve inode or attempt exchange once: calls=%d", calls)
+			for p, want := range map[string]os.FileInfo{path: shimInfo, sidecar: originalInfo} {
+				got, statErr := os.Stat(p)
+				if statErr != nil || !os.SameFile(want, got) {
+					t.Errorf("refusal changed %s: %v", p, statErr)
+				}
 			}
+			if calls != 1 {
+				t.Errorf("expected one exchange attempt, got %d", calls)
+			}
+			if err != nil && !strings.Contains(err.Error(), "mv "+shSingleQuote(sidecar)+" "+shSingleQuote(path)) {
+				t.Errorf("refusal omits manual restoration guidance: %v", err)
+			}
+		})
+	}
+}
+
+func TestUninstallNoReplaceUnsupportedRefusal(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	for _, f := range []struct {
+		name  string
+		errno syscall.Errno
+	}{
+		{"ENOSYS", syscall.ENOSYS}, {"EINVAL", syscall.EINVAL}, {"ENOTSUP", syscall.ENOTSUP}, {"EOPNOTSUPP", syscall.EOPNOTSUPP},
+	} {
+		t.Run(f.name, func(t *testing.T) {
+			dir, path, _ := setupExchangeAdoption(t)
+			sidecar := path + AdoptedSuffix
+			shimInfo, _ := os.Stat(path)
+			originalInfo, _ := os.Stat(sidecar)
+			probeCalls, exchangeCalls := 0, 0
+			uninstallExchangeHook = func(_, _ string) error { exchangeCalls++; return nil }
+			uninstallNoReplaceHook = func(from, to string) error {
+				probeCalls++
+				if from == path || from == sidecar || to == path || to == sidecar {
+					t.Error("capability probe touched shared program name")
+				}
+				return &os.LinkError{Op: "rename-noreplace", Old: from, New: to, Err: f.errno}
+			}
+			err := Uninstall(TargetXclip, dir)
+			if !errors.Is(err, f.errno) || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), sidecar) {
+				t.Errorf("expected unsupported refusal naming retained programs: %v", err)
+			}
+			if probeCalls == 0 || exchangeCalls != 0 {
+				t.Errorf("probe=%d exchange=%d; unsupported must precede exchange", probeCalls, exchangeCalls)
+			}
+			for p, want := range map[string]os.FileInfo{path: shimInfo, sidecar: originalInfo} {
+				got, statErr := os.Stat(p)
+				if statErr != nil || !os.SameFile(want, got) {
+					t.Errorf("unsupported mutated %s: %v", p, statErr)
+				}
+			}
+			t.Logf("uninstall=%v; probe=%d exchange=%d", err, probeCalls, exchangeCalls)
+		})
+	}
+}
+
+func TestUninstallQuarantineCollision(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	dir, path, original := setupExchangeAdoption(t)
+	sidecar := path + AdoptedSuffix
+	var collisions []string
+	uninstallNoReplaceHook = func(from, to string) error {
+		if from == sidecar {
+			if err := os.WriteFile(to, []byte("FOREIGN QUARANTINE"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			collisions = append(collisions, to)
+		}
+		return nil
+	}
+	err := Uninstall(TargetXclip, dir)
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		t.Errorf("expected quarantine collision: %v", err)
+	}
+	if len(collisions) == 0 {
+		t.Error("quarantine boundary not reached")
+	}
+	for _, p := range collisions {
+		if err != nil && !strings.Contains(err.Error(), p) {
+			t.Errorf("error omits quarantine collision location: %v", err)
+		}
+		got, readErr := os.ReadFile(p)
+		if readErr != nil || string(got) != "FOREIGN QUARANTINE" {
+			t.Errorf("collision overwritten or removed: %q %v", got, readErr)
+		}
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != original || !isOurShim(sidecar) {
+		t.Errorf("unexpected post-exchange collision state: %q %v; error=%v", got, readErr, err)
+	}
+	t.Logf("uninstall=%v; collisions=%v", err, collisions)
+}
+
+func TestUninstallQuarantineForeignRestoration(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	for _, collision := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restoration_collision_%t", collision), func(t *testing.T) {
+			dir, path, original := setupExchangeAdoption(t)
+			sidecar := path + AdoptedSuffix
+			incoming := filepath.Join(dir, "incoming")
+			if err := os.WriteFile(incoming, []byte("FOREIGN SIDECAR"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			foreignInfo, _ := os.Stat(incoming)
+			quarantine := ""
+			restoreCalls := 0
+			uninstallNoReplaceHook = func(from, to string) error {
+				if from == sidecar {
+					quarantine = to
+					if err := os.Rename(incoming, sidecar); err != nil {
+						t.Fatal(err)
+					}
+				} else if from == quarantine && to == sidecar {
+					restoreCalls++
+					if collision {
+						if err := os.WriteFile(sidecar, []byte("SECOND FOREIGN"), 0755); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				return nil
+			}
+			uninstallCleanupHook = func(p string) error {
+				data, _ := os.ReadFile(p)
+				if len(data) == 0 {
+					return nil
+				} // private capability probe
+				t.Errorf("foreign entry must never reach cleanup: %s", p)
+				return syscall.EPERM
+			}
+			err := Uninstall(TargetXclip, dir)
+			if err == nil || restoreCalls != 1 {
+				t.Errorf("expected conflict and foreign restoration attempt: err=%v calls=%d", err, restoreCalls)
+			}
+			foreignPath := sidecar
+			if collision {
+				foreignPath = quarantine
+			}
+			info, statErr := os.Stat(foreignPath)
+			if statErr != nil || !os.SameFile(foreignInfo, info) {
+				t.Errorf("foreign inode lost at %s: %v", foreignPath, statErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), foreignPath) {
+				t.Errorf("error omits retained foreign location: %v", err)
+			}
+			if collision {
+				got, readErr := os.ReadFile(sidecar)
+				if readErr != nil || string(got) != "SECOND FOREIGN" {
+					t.Errorf("restoration overwrote newcomer: %q %v", got, readErr)
+				}
+			}
+			got, readErr := os.ReadFile(path)
+			if readErr != nil || string(got) != original {
+				t.Errorf("original changed: %q %v", got, readErr)
+			}
+			t.Logf("uninstall=%v; foreignPath=%s", err, foreignPath)
 		})
 	}
 }
