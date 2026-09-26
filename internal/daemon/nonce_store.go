@@ -91,7 +91,6 @@ func (s *Server) persistNoncesLocked() error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
 	store := persistedNonceStore{
 		Version: 1,
 		Nonces:  make([]persistedNonce, 0, len(s.notifyNonces)),
@@ -126,31 +125,38 @@ func (s *Server) persistNoncesLocked() error {
 	if err != nil {
 		return fmt.Errorf("encode nonce store: %w", err)
 	}
+	return writeFileAtomic(path, append(data, '\n'))
+}
 
-	tmp, err := os.CreateTemp(dir, nonceStoreFile+".tmp-*")
+// writeFileAtomic replaces path with data, mode 0600, through a synced temp file
+// in the same directory and a rename, so a crash leaves either the old file or
+// the new one, never a torn write.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("create temp nonce store: %w", err)
+		return fmt.Errorf("create temp file for %s: %w", path, err)
 	}
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	if err := tmp.Chmod(0600); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("chmod temp nonce store: %w", err)
+		return fmt.Errorf("chmod temp file for %s: %w", path, err)
 	}
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write temp nonce store: %w", err)
+		return fmt.Errorf("write temp file for %s: %w", path, err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("fsync temp nonce store: %w", err)
+		return fmt.Errorf("fsync temp file for %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp nonce store: %w", err)
+		return fmt.Errorf("close temp file for %s: %w", path, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename nonce store into place: %w", err)
+		return fmt.Errorf("rename %s into place: %w", path, err)
 	}
 	if dirFile, err := os.Open(dir); err == nil {
 		_ = dirFile.Sync()

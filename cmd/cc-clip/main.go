@@ -597,6 +597,12 @@ func cmdDoctor() {
 		remoteOK := doctor.PrintResults(remoteResults)
 		fmt.Println()
 
+		// Receipts never fail the run: they say whether wired hooks have
+		// actually fired, which a quiet week does not make wrong.
+		fmt.Println("Delivery receipts:")
+		doctor.PrintResults(doctor.DeliveryReceipts(host))
+		fmt.Println()
+
 		if localOK && remoteOK {
 			fmt.Println("All checks passed. cc-clip is ready.")
 		} else {

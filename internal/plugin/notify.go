@@ -24,7 +24,10 @@ import (
 // cmd/cc-clip/main.go:postGenericNotification. The wire bytes (field order,
 // headers, status handling) are preserved so the deployed notify path is
 // unchanged.
-func PostNotification(port int, msg daemon.GenericMessagePayload) error {
+//
+// target names the sending Target for the daemon's delivery receipt; empty
+// omits the field and the daemon records the notification as unattributed.
+func PostNotification(port int, target string, msg daemon.GenericMessagePayload) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("cannot determine home directory: %w", err)
@@ -43,12 +46,14 @@ func PostNotification(port int, msg daemon.GenericMessagePayload) error {
 		Urgency int    `json:"urgency"`
 		Sound   string `json:"sound,omitempty"`
 		Trusted bool   `json:"trusted,omitempty"`
+		Target  string `json:"target,omitempty"`
 	}{
 		Title:   msg.Title,
 		Body:    msg.Body,
 		Urgency: msg.Urgency,
 		Sound:   msg.Sound,
 		Trusted: msg.Verified,
+		Target:  target,
 	}
 
 	body, err := json.Marshal(payload)

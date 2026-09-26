@@ -61,6 +61,11 @@ func cmdServe() {
 	srv.SetTextWriter(daemon.NewClipboardTextWriter())
 	srv.SetVersion(version)
 	srv.EnableNoncePersistence()
+	if receiptsPath, err := daemon.ReceiptStorePath(); err != nil {
+		log.Printf("WARN: delivery receipts disabled: %v", err)
+	} else {
+		srv.EnableDeliveryReceipts(receiptsPath)
+	}
 	if loaded, err := srv.LoadPersistedNonces(); err != nil {
 		log.Printf("WARN: failed to load notification nonces: %v", err)
 	} else if loaded > 0 {

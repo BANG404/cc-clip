@@ -16,9 +16,13 @@ const (
 // display-ready text derived by the classifier). For other kinds, exactly
 // one payload field is non-nil, matching Kind.
 type NotifyEnvelope struct {
-	Kind      NotifyKind
-	Source    string
-	Host      string
+	Kind   NotifyKind
+	Source string
+	Host   string
+	// Target is the agent CLI the notification came from (see
+	// ReceiptTargets). Unlike Host it is self-declared by the sender: it only
+	// attributes a delivery receipt and never gates delivery.
+	Target    string
 	Timestamp time.Time
 
 	ImageTransfer  *ImageTransferPayload

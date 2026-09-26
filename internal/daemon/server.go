@@ -78,6 +78,8 @@ type Server struct {
 	addr              string
 	mux               *http.ServeMux
 	textWriter        ClipboardTextWriter // nil until SetTextWriter; POST /clipboard/text answers 501 without it
+	receiptsPath      string              // empty until EnableDeliveryReceipts; /notify then records a Receipt per acceptance
+	receiptsMu        sync.Mutex          // serializes this daemon's read-merge-write of the receipt store
 	version           string              // reported by /health when set via SetVersion (#22 P2)
 }
 
@@ -102,6 +104,28 @@ func NewServer(addr string, clipboard ClipboardReader, tokens *token.Manager, se
 	s.mux.HandleFunc("POST /notify", s.handleNotify)
 	s.mux.HandleFunc("POST /register-nonce", s.authMiddleware(s.handleRegisterNonce))
 	return s
+}
+
+// EnableDeliveryReceipts makes /notify record a Receipt in the store at path
+// for every accepted notification. Tests leave it off unless they exercise
+// receipts directly.
+func (s *Server) EnableDeliveryReceipts(path string) {
+	s.receiptsMu.Lock()
+	s.receiptsPath = path
+	s.receiptsMu.Unlock()
+}
+
+// recordReceipt stores that env was accepted. A failure is logged, never
+// returned: a receipt is diagnostics, and the notification itself was fine.
+func (s *Server) recordReceipt(env NotifyEnvelope) {
+	s.receiptsMu.Lock()
+	defer s.receiptsMu.Unlock()
+	if s.receiptsPath == "" {
+		return
+	}
+	if err := RecordReceipt(s.receiptsPath, env.Host, env.Target, time.Now().UTC()); err != nil {
+		log.Printf("WARN: failed to record delivery receipt: %v", err)
+	}
 }
 
 // EnableNoncePersistence makes notification nonce mutations durable across
@@ -658,6 +682,7 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 
 	s.enqueueEnvelope(env)
 	w.WriteHeader(http.StatusNoContent)
+	s.recordReceipt(env)
 }
 
 // parseNotifyRequest decodes the request body into a NotifyEnvelope.
@@ -699,6 +724,9 @@ func (s *Server) parseClaudeHookPayload(body []byte) (NotifyEnvelope, error) {
 	if env == nil {
 		return NotifyEnvelope{}, fmt.Errorf("classifier returned nil")
 	}
+	// The content type is only ever sent by Claude's hooks (the managed runner
+	// and the cc-clip-hook fallback), so it attributes the Target by itself.
+	env.Target = "claude"
 	return *env, nil
 }
 
@@ -711,6 +739,7 @@ func (s *Server) parseGenericJSON(body []byte) (NotifyEnvelope, error) {
 		Host    string `json:"host"`
 		Sound   string `json:"sound"`
 		Trusted bool   `json:"trusted"`
+		Target  string `json:"target"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return NotifyEnvelope{}, fmt.Errorf("invalid JSON: %w", err)
@@ -723,6 +752,7 @@ func (s *Server) parseGenericJSON(body []byte) (NotifyEnvelope, error) {
 		Kind:      KindGenericMessage,
 		Source:    "generic",
 		Host:      payload.Host,
+		Target:    NormalizeReceiptTarget(payload.Target),
 		Timestamp: time.Now().UTC(),
 		GenericMessage: &GenericMessagePayload{
 			Title:    payload.Title,

@@ -983,7 +983,7 @@ func TestPostGenericNotificationDeliversExpectedPayload(t *testing.T) {
 		Sound:    "Ping",
 		Verified: true,
 	}
-	if err := postGenericNotification(port, msg); err != nil {
+	if err := postGenericNotification(port, "", msg); err != nil {
 		t.Fatalf("postGenericNotification failed: %v", err)
 	}
 
