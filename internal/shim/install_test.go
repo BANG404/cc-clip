@@ -15,6 +15,7 @@ import (
 
 // Set only in isolated overlay subprocesses, never in production code.
 var uninstallExchangeHook func(string, string) error
+var uninstallProbeExchangeHook func(string, string) error
 var uninstallExchangeCapability func(string, string) error
 var uninstallCleanupHook func(string) error
 var uninstallNoReplaceHook func(string, string) error
@@ -51,6 +52,7 @@ func runUninstallExchangeProbe(t *testing.T) bool {
 		delegate = "os.Rename(from, to)"
 	}
 	patched := strings.Replace(string(source), call, "uninstallTestExchange(sidecar, path)", 1)
+	patched = strings.ReplaceAll(patched, "exchangePrograms(a.Name(), moved)", "uninstallTestProbeExchange(a.Name(), moved)")
 	for _, cleanup := range []string{"os.Remove(sidecar)", "os.Remove(quarantine)"} {
 		patched = strings.ReplaceAll(patched, cleanup, strings.Replace(cleanup, "os.Remove", "uninstallTestCleanup", 1))
 	}
@@ -75,6 +77,12 @@ func uninstallTestCleanup(path string) error {
 
 func init() {
 	uninstallExchangeCapability = func(from, to string) error { return ` + delegate + ` }
+}
+func uninstallTestProbeExchange(from, to string) error {
+	if uninstallProbeExchangeHook != nil {
+		if err := uninstallProbeExchangeHook(from, to); err != nil { return err }
+	}
+	return exchangePrograms(from, to)
 }
 func uninstallTestExchange(from, to string) error {
 	if uninstallExchangeHook != nil {
@@ -1155,5 +1163,97 @@ func TestReinstallKeepsTheAdoptedProgramAsFallback(t *testing.T) {
 	}
 	if !strings.Contains(string(shimBody), adopted) {
 		t.Fatal("the reinstalled shim does not delegate to the adopted program")
+	}
+}
+
+// TestUninstallWaylandCapabilityRefusalChangesNothing pins the batch
+// capability probe: with an unadopted wl-paste shim and an adopted wl-copy,
+// an unsupported exchange refused only after wl-paste had been removed. The
+// probe now runs on private entries before any shared name is touched.
+func TestUninstallWaylandCapabilityRefusalChangesNothing(t *testing.T) {
+	if !runUninstallExchangeProbe(t) {
+		return
+	}
+	for _, f := range []struct {
+		name  string
+		errno syscall.Errno
+	}{
+		{"ENOSYS", syscall.ENOSYS}, {"EINVAL", syscall.EINVAL}, {"ENOTSUP", syscall.ENOTSUP}, {"EOPNOTSUPP", syscall.EOPNOTSUPP},
+	} {
+		t.Run(f.name, func(t *testing.T) {
+			dir := t.TempDir()
+			wlCopy := filepath.Join(dir, "wl-copy")
+			if err := os.WriteFile(wlCopy, []byte("#!/bin/sh\necho ORIGINAL-WL-COPY\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := InstallWithOptions(TargetWlPaste, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+				t.Fatal(err)
+			}
+			wlPaste := filepath.Join(dir, "wl-paste")
+			before := map[string]os.FileInfo{}
+			for _, p := range []string{wlPaste, wlCopy, wlCopy + AdoptedSuffix} {
+				info, err := os.Stat(p)
+				if err != nil {
+					t.Fatalf("setup: %s: %v", p, err)
+				}
+				before[p] = info
+			}
+			realExchanges := 0
+			uninstallExchangeHook = func(_, _ string) error { realExchanges++; return nil }
+			uninstallProbeExchangeHook = func(_, _ string) error { return f.errno }
+			t.Cleanup(func() { uninstallExchangeHook = nil; uninstallProbeExchangeHook = nil })
+
+			err := Uninstall(TargetWlPaste, dir)
+			if !errors.Is(err, f.errno) || !strings.Contains(err.Error(), "nothing was changed") {
+				t.Fatalf("expected a refusal before any change: %v", err)
+			}
+			if realExchanges != 0 {
+				t.Errorf("refusal must precede every real exchange, got %d", realExchanges)
+			}
+			for p, want := range before {
+				got, statErr := os.Stat(p)
+				if statErr != nil || !os.SameFile(want, got) {
+					t.Errorf("%s changed by a refused uninstall: %v", p, statErr)
+				}
+			}
+		})
+	}
+}
+
+// TestUninstallResumesAfterACompanionRefusal pins that a Wayland uninstall
+// interrupted after wl-paste was removed can be completed by running it again:
+// the missing main shim with no sidecar counts as already uninstalled.
+func TestUninstallResumesAfterACompanionRefusal(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("restore needs the atomic exchange available on Linux and Darwin")
+	}
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	wlCopy := filepath.Join(dir, "wl-copy")
+	original := "#!/bin/sh\necho ORIGINAL-WL-COPY\n"
+	if err := os.WriteFile(wlCopy, []byte(original), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallWithOptions(TargetWlPaste, dir, 18339, InstallOptions{AdoptForeign: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The state an earlier run leaves when it removed wl-paste and then
+	// refused on wl-copy.
+	if err := os.Remove(filepath.Join(dir, "wl-paste")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Uninstall(TargetWlPaste, dir); err != nil {
+		t.Fatalf("resumed uninstall must complete: %v", err)
+	}
+	got, err := os.ReadFile(wlCopy)
+	if err != nil || string(got) != original {
+		t.Fatalf("wl-copy not restored: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(wlCopy + AdoptedSuffix); !os.IsNotExist(err) {
+		t.Errorf("sidecar must be consumed by the restore: %v", err)
+	}
+	if err := Uninstall(TargetWlPaste, dir); err == nil {
+		t.Error("with nothing left to uninstall, uninstall must still report it")
 	}
 }

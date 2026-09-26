@@ -262,18 +262,101 @@ func Uninstall(target Target, installDir string) error {
 	// Inspect EVERY destination and sidecar before changing ANY entry. A
 	// companion conflict must not strand the main shim halfway uninstalled.
 	var pending []string
+	restores := make(map[string]bool)
+	needsExchange := false
+	mainGone := false
 	for i, path := range paths {
-		remove, _, err := preflightUninstallShim(path, i != 0)
+		if i == 0 && uninstallAlreadyDone(path) {
+			// A resumed uninstall: an earlier run removed the main shim and
+			// then refused on the companion. Continue with the companion.
+			mainGone = true
+			continue
+		}
+		remove, restore, err := preflightUninstallShim(path, i != 0)
 		if err != nil {
 			return err
 		}
 		if remove {
 			pending = append(pending, path)
+			restores[path] = restore
+			needsExchange = needsExchange || restore
 		}
+	}
+	if len(pending) == 0 {
+		if mainGone {
+			return fmt.Errorf("%s is not a cc-clip shim (or does not exist)", shimPath)
+		}
+		return nil
+	}
+	// Establish every capability the batch needs before touching any shared
+	// name, so an unsupported kernel or filesystem refuses the WHOLE request
+	// with nothing changed rather than after an earlier path was processed.
+	if err := probeUninstallCapabilities(installDir, needsExchange); err != nil {
+		return batchRefused(pending, restores, err)
 	}
 	for _, path := range pending {
 		if err := uninstallShim(path); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// batchRefused explains a refusal that happened before any entry changed,
+// naming where every shim and adopted program still is.
+func batchRefused(pending []string, restores map[string]bool, cause error) error {
+	cause = fmt.Errorf("nothing was changed: %w", cause)
+	errs := make([]error, 0, len(pending))
+	for _, path := range pending {
+		if restores[path] {
+			errs = append(errs, restoreRefused(path, path+AdoptedSuffix, cause))
+			continue
+		}
+		errs = append(errs, fmt.Errorf("safe uninstall refused: shim left untouched at %s: %w", path, cause))
+	}
+	return errors.Join(errs...)
+}
+
+// uninstallAlreadyDone reports a main path with nothing left to undo: no entry
+// at the path and no adopted sidecar. It is what a resumed Wayland uninstall
+// finds after an earlier run removed wl-paste and refused on wl-copy.
+func uninstallAlreadyDone(path string) bool {
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return false
+	}
+	_, err := os.Lstat(path + AdoptedSuffix)
+	return os.IsNotExist(err)
+}
+
+// probeUninstallCapabilities runs the no-replace rename and, when a restore is
+// due, the atomic exchange on two private entries in dir. Every primitive the
+// batch will use is proven on this directory's filesystem before any shared
+// program pathname is touched.
+func probeUninstallCapabilities(dir string, needsExchange bool) error {
+	a, err := os.CreateTemp(dir, ".cc-clip-uninstall-probe-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(a.Name()) // Private, never a shared program pathname.
+	if err := a.Close(); err != nil {
+		return err
+	}
+	b, err := os.CreateTemp(dir, ".cc-clip-uninstall-probe-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(b.Name())
+	if err := b.Close(); err != nil {
+		return err
+	}
+	moved := b.Name() + ".moved"
+	defer os.Remove(moved)
+	if err := renameProgramNoReplace(b.Name(), moved); err != nil {
+		return fmt.Errorf("no-replace rename unsupported here: %w", err)
+	}
+	if needsExchange {
+		if err := exchangePrograms(a.Name(), moved); err != nil {
+			return fmt.Errorf("atomic exchange unsupported here: %w", err)
 		}
 	}
 	return nil
@@ -308,6 +391,13 @@ func preflightUninstallShim(path string, optional bool) (remove, restore bool, e
 // uninstallShim defends against concurrent writers on the shared names path
 // and path+AdoptedSuffix. Our private random names, process kill mid-operation,
 // and filesystem-level faults after the exchange commits are out of scope.
+//
+// Across a Wayland batch the guarantee is about programs, not our shims: a
+// refusal never deletes or overwrites any program on a shared name, and a
+// refusal found by the up-front capability probe changes nothing at all. A
+// concurrent writer that makes wl-copy refuse after wl-paste was processed
+// can leave our own wl-paste shim removed; running uninstall again completes
+// the rest (see uninstallAlreadyDone).
 // Only a shim inspected at a private name may be unlinked; shared names are
 // never unlinked or overwritten based on a preceding ownership check.
 func uninstallShim(path string) error {
