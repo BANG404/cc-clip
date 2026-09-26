@@ -276,17 +276,6 @@ func Uninstall(target Target, installDir string) error {
 	return nil
 }
 
-// writeShimFile installs a shim at path without destroying anything that is
-// not ours.
-//
-// Two failure modes this guards against, both reproduced against a real
-// install dir: an existing program at the shim path was truncated in place,
-// and a symlink at the shim path had its TARGET rewritten — so
-// `~/.local/bin/xclip -> ../real-xclip` turned the user's real binary into a
-// copy of the shim, with no backup. Anything at the path that cc-clip did not
-// write is now refused rather than overwritten, and the write itself goes to a
-// sibling temp file that is renamed over the path, so a symlink is replaced
-// instead of followed.
 // AdoptedSuffix is appended to a foreign file moved aside by an adopting
 // install. The shim then delegates to it, so the program that used to answer on
 // that path still answers — one directory entry over.
