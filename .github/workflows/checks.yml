@@ -21,6 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history: the translation marker check below compares each
+          # marker SHA with later commits to its English source.
+          fetch-depth: 0
 
       # These paths are per-machine agent tooling, excluded by .gitignore.
       # Enforced here because .gitignore only stops accidental adds — a
@@ -57,6 +61,12 @@ jobs:
           # plural GoReleaser v2 form introduced in PR #33.
           grep -Fq 'formats: [tar.gz]' .goreleaser.yaml
           grep -Fq 'formats: [zip]' .goreleaser.yaml
+
+      # Translations silently lagged the English README from v0.10.0 to
+      # v0.12.0. A translation fails here once its source changes after the
+      # SHA in its i18n-source marker; update it in the same PR.
+      - name: Policy - translations are not behind their English source
+        run: make i18n-check
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
