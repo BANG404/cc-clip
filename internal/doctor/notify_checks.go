@@ -25,6 +25,10 @@ import (
 // the ownership prefix. A hook wired for a different port is still ours and
 // still present, but it posts to a daemon that is not there — reporting it as
 // "wired" is the check agreeing with the bug instead of catching it.
+//
+// The legacy managed command is checked before the wrong-port branch: it shares
+// the ownership prefix but carries no port at all, so it was reported as
+// "DIFFERENT port" on a host whose port was correct.
 func claudeHooksProbeCommand(port int) string {
 	return fmt.Sprintf(`f="$HOME/.claude/settings.json"
 if [ ! -f "$f" ]; then
@@ -32,12 +36,14 @@ if [ ! -f "$f" ]; then
 elif grep -qF '%s' "$f"; then
     echo 'claude-hooks:managed'
 elif grep -qF '%s' "$f"; then
+    echo 'claude-hooks:managed-legacy'
+elif grep -qF '%s' "$f"; then
     echo 'claude-hooks:managed-wrong-port'
 elif grep -qF 'cc-clip-hook' "$f"; then
     echo 'claude-hooks:user-authored'
 else
     echo 'claude-hooks:none'
-fi`, shim.ClaudeManagedHookCommand(port), shim.ClaudeManagedOwnerPrefix)
+fi`, shim.ClaudeManagedHookCommand(port), shim.ClaudeLegacyManagedHookCommand, shim.ClaudeManagedOwnerPrefix)
 }
 
 // codexNotifyProbeCommand classifies the notify wiring in ~/.codex/config.toml.
@@ -65,6 +71,8 @@ func classifyClaudeHooksCheck(out string, err error) CheckResult {
 	switch {
 	case strings.Contains(out, "claude-hooks:managed-wrong-port"):
 		return CheckResult{"claude-hooks", false, "a cc-clip managed hook is wired in ~/.claude/settings.json but for a DIFFERENT port; its notifications go to a daemon that is not there. Re-run 'cc-clip connect <host> --claude --port <port>'"}
+	case strings.Contains(out, "claude-hooks:managed-legacy"):
+		return CheckResult{"claude-hooks", true, "legacy managed hook wired in ~/.claude/settings.json (works via the cc-clip-hook fallback script; re-run 'cc-clip connect <host> --claude' to migrate to the managed runner)"}
 	case strings.Contains(out, "claude-hooks:managed"):
 		return CheckResult{"claude-hooks", true, "managed notify runner wired in ~/.claude/settings.json"}
 	case strings.Contains(out, "claude-hooks:user-authored"):

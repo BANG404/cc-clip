@@ -37,6 +37,13 @@ func ClaudeManagedHookCommand(port int) string { return claudeManagedHookCommand
 // "cc-clip-hook" lacks this prefix and is therefore never matched or stripped.
 const claudeManagedHookOwnerPrefix = "env CC_CLIP_MANAGED=1"
 
+// ClaudeLegacyManagedHookCommand is the managed command pre-release builds of
+// the settings merge wrote before the plugin runner existed; no release tag
+// installs it, but the merge still strips it as legacy. It carries no port
+// (the fallback script has its own), so doctor must not read its presence as a
+// wrong-port hook.
+const ClaudeLegacyManagedHookCommand = claudeManagedHookOwnerPrefix + " cc-clip-hook"
+
 // ClaudeManagedOwnerPrefix exposes the ownership marker to other packages
 // (doctor's remote checks) so their detection can never drift from what the
 // settings merge actually installs. Same permanence contract as the
