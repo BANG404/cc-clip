@@ -339,6 +339,60 @@ func TestShimInterceptsMatchingInvocations(t *testing.T) {
 		clipType string
 	}{
 		{
+			name:   "claude_wlpaste_short_list",
+			render: WlPasteShim,
+			args:   []string{"-l"},
+			expect: expectInterceptType,
+		},
+		{
+			name:   "kimi_wlpaste_generic_image",
+			render: WlPasteShim,
+			args:   []string{"-t", "image"},
+			expect: expectInterceptImage,
+		},
+		{
+			name:   "mastracode_xclip_targets",
+			render: XclipShim,
+			args:   []string{"-selection", "clipboard", "-target", "TARGETS", "-o"},
+			expect: expectInterceptType,
+		},
+		{
+			name:   "mastracode_xclip_image",
+			render: XclipShim,
+			args:   []string{"-selection", "clipboard", "-target", "image/png", "-o"},
+			expect: expectInterceptImage,
+		},
+		{
+			name:   "wlpaste_not_list",
+			render: WlPasteShim,
+			args:   []string{"--list"},
+			expect: expectFallback,
+		},
+		{
+			name:   "wlpaste_not_lh",
+			render: WlPasteShim,
+			args:   []string{"-lh"},
+			expect: expectFallback,
+		},
+		{
+			name:   "wlpaste_not_image_prefix",
+			render: WlPasteShim,
+			args:   []string{"-t", "imagefoo"},
+			expect: expectFallback,
+		},
+		{
+			name:   "xclip_target_primary_write_passthrough",
+			render: XclipShim,
+			args:   []string{"-selection", "primary", "-target", "image/png"},
+			expect: expectFallback,
+		},
+		{
+			name:   "xclip_target_text_read_passthrough",
+			render: XclipShim,
+			args:   []string{"-selection", "clipboard", "-target", "text/html", "-o"},
+			expect: expectFallback,
+		},
+		{
 			name:   "claude_xclip_targets",
 			render: XclipShim,
 			args:   []string{"-selection", "clipboard", "-t", "TARGETS", "-o"},

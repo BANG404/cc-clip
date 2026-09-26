@@ -126,6 +126,11 @@ binaries. The flag cannot be combined with `--local-bin` in the same run.
 > opencode and Antigravity integration generation is covered by tests, but host
 > event delivery has not yet been smoke-tested on a representative machine.
 > Please [report what you find](https://github.com/ShunmeiCho/cc-clip/issues).
+>
+> Kimi Code and MastraCode read the clipboard through `wl-paste` / `xclip`
+> invocations the shim intercepts, so image paste should work with the default
+> target. This is verified statically against their source and by shim tests,
+> not yet end to end with the real CLIs.
 
 ### Other local platforms
 
