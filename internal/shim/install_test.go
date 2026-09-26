@@ -24,6 +24,10 @@ func runUninstallExchangeProbe(t *testing.T) bool {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("atomic exchange is only supported on Darwin and Linux")
 	}
+	// Read the Go toolchain locations before HOME moves: the child `go test`
+	// otherwise derives GOPATH and GOCACHE from the temp HOME, re-downloads
+	// modules into it, and t.TempDir cannot remove the read-only module cache.
+	toolEnv := goToolchainEnv(t)
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("CC_CLIP_TOKEN_DIR", filepath.Join(dir, "tokens"))
@@ -69,13 +73,34 @@ func uninstallTestExchange(from, to string) error {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("go", "test", "-race", "-overlay", overlayPath, ".", "-run", "^"+t.Name()+"$", "-count=1", "-v")
-	cmd.Env = append(os.Environ(), "CC_CLIP_TEST_EXCHANGE=1")
+	cmd.Env = append(append(os.Environ(), toolEnv...), "CC_CLIP_TEST_EXCHANGE=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("%s", out)
 	if err != nil {
 		t.Fatalf("exchange probe: %v", err)
 	}
 	return false
+}
+
+// goToolchainEnv returns the caller's GOPATH, GOMODCACHE and GOCACHE as
+// KEY=value pairs, so a child `go` run under an isolated HOME still uses the
+// real module and build caches.
+func goToolchainEnv(t *testing.T) []string {
+	t.Helper()
+	keys := []string{"GOPATH", "GOMODCACHE", "GOCACHE"}
+	out, err := exec.Command("go", append([]string{"env"}, keys...)...).Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+	values := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(values) != len(keys) {
+		t.Fatalf("go env returned %d values for %d keys: %q", len(values), len(keys), out)
+	}
+	env := make([]string, len(keys))
+	for i, k := range keys {
+		env[i] = k + "=" + values[i]
+	}
+	return env
 }
 
 func setupExchangeAdoption(t *testing.T) (dir, path, original string) {
