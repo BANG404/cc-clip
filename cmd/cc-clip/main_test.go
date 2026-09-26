@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -558,6 +559,32 @@ func TestNotifyFromCodexRejectsInvalidJSON(t *testing.T) {
 	_, err := parseCodexNotifyPayload(`{invalid`)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestNotifyPortFlag(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    int
+		wantErr bool
+	}{
+		{"explicit port wins over the default", []string{"--port", "18340", "--title", "t"}, 18340, false},
+		{"no flag keeps the default", []string{"--title", "t"}, 18339, false},
+		{"non-numeric port is rejected", []string{"--port", "abc"}, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, f := newNotifyFlagSet(flag.ContinueOnError, 18339)
+			fs.SetOutput(io.Discard)
+			err := fs.Parse(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Parse(%v) error = %v, wantErr %v", tt.args, err, tt.wantErr)
+			}
+			if !tt.wantErr && *f.port != tt.want {
+				t.Errorf("port = %d, want %d", *f.port, tt.want)
+			}
+		})
 	}
 }
 
