@@ -73,6 +73,46 @@ If a grep fails, fix the drift in the file it names AND in every other
 file in the list above. The contract is a three-way agreement, not
 two separate pairs.
 
+## Phase 2.5: Write the release notes (before the tag)
+
+The user-facing notes are written and committed BEFORE the tag, as
+`docs/release-notes/$V.md`. The release workflow refuses a tag without them
+(`make release-notes-check`) and passes the file to goreleaser as the release
+body, so what you commit here is exactly what users see on GitHub. This used
+to be a manual `gh release edit` after publishing, and v0.11.1 shipped with
+only goreleaser's commit list because that step was skipped.
+
+```bash
+V=v0.6.2
+$EDITOR "docs/release-notes/$V.md"      # body starts with: ## What's New in $V
+make release-notes-check V="$V"
+git add "docs/release-notes/$V.md" && git commit -m "docs: release notes for $V"
+git push origin main
+```
+
+The notes file should cover, in this order:
+
+1. **What's New** — the flagship change, with a short code block if it
+   introduces a new command or flag.
+2. **Other Improvements** — documentation, tooling, CI, everything else
+   that users might notice but is not the headline.
+3. **Upgrade** — concrete commands per platform. On cc-clip this is
+   `cc-clip update` for 0.6.2+ macOS/Linux users, `install.sh` for
+   fresh macOS/Linux installs, `install.ps1` for Windows installs/upgrades,
+   and always the `cc-clip connect <host> --force` reminder for remote hosts.
+4. **Not in This Release** — features deferred, known limitations, links
+   to issues tracking follow-ups. This stops users filing "why didn't
+   X ship" questions.
+5. **Verification** — a short snippet showing how to check the archive
+   against `checksums.txt`. Makes integrity verification a copy-paste
+   one-liner.
+6. **Full Commit List + Diff link** — short SHAs, link to
+   `https://github.com/<repo>/compare/<prev>...<tag>`.
+
+Compare the end result against the release pages for the previous two
+versions — the shape should match so users subscribed to releases can
+skim instead of re-reading the format each time.
+
 ## Phase 3: Cut and push the tag
 
 ```bash
@@ -142,41 +182,12 @@ gh run watch "$RUN_ID" --exit-status
 
 Non-zero exit means the release was not published. See **Phase 6** for recovery.
 
-## Phase 4.5: Write real release notes
+## Phase 4.5: Check the release page
 
-GoReleaser's default release body is a two-line commit list with SHAs,
-which is the minimum the release page can legally show. For every tag
-worth cutting, replace it with a user-facing summary before moving on.
-The tag annotation from Phase 3 is `git show $V` forever, but it is NOT
-what end users see on GitHub until this step happens.
-
-```bash
-V=v0.6.2
-gh release edit "$V" --notes-file path/to/notes.md
-```
-
-The notes file should cover, in this order:
-
-1. **What's New** — the flagship change, with a short code block if it
-   introduces a new command or flag.
-2. **Other Improvements** — documentation, tooling, CI, everything else
-   that users might notice but is not the headline.
-3. **Upgrade** — concrete commands per platform. On cc-clip this is
-   `cc-clip update` for 0.6.2+ macOS/Linux users, `install.sh` for
-   fresh macOS/Linux installs, `install.ps1` for Windows installs/upgrades,
-   and always the `cc-clip connect <host> --force` reminder for remote hosts.
-4. **Not in This Release** — features deferred, known limitations, links
-   to issues tracking follow-ups. This stops users filing "why didn't
-   X ship" questions.
-5. **Verification** — a short snippet showing how to check the archive
-   against `checksums.txt`. Makes integrity verification a copy-paste
-   one-liner.
-6. **Full Commit List + Diff link** — short SHAs, link to
-   `https://github.com/<repo>/compare/<prev>...<tag>`.
-
-Compare the end result against the release pages for the previous two
-versions — the shape should match so users subscribed to releases can
-skim instead of re-reading the format each time.
+The body comes from `docs/release-notes/$V.md` (Phase 2.5). Open the release
+page and compare it with the previous two releases; fix a typo with
+`gh release edit "$V" --notes-file "docs/release-notes/$V.md"` after
+correcting the file on `main`, so the archive and the page stay identical.
 
 ## Phase 5: Verify the published release
 
