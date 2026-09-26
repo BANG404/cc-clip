@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/daemon"
@@ -61,7 +62,7 @@ func cmdServe() {
 	srv.SetTextWriter(daemon.NewClipboardTextWriter())
 	srv.SetVersion(version)
 	srv.EnableNoncePersistence()
-	if receiptsPath, err := daemon.ReceiptStorePath(port); err != nil {
+	if receiptsPath, err := daemon.ReceiptStorePath(listener.Addr().(*net.TCPAddr).Port); err != nil {
 		log.Printf("WARN: delivery receipts disabled: %v", err)
 	} else {
 		srv.EnableDeliveryReceipts(receiptsPath)

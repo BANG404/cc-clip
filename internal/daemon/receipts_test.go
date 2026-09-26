@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -146,10 +148,30 @@ func TestNotifyRecordsAReceiptPerTarget(t *testing.T) {
 	}
 }
 
+// blockingWriter never returns from Write until released, like a log sink on a
+// stalled disk or an unread pipe.
+type blockingWriter struct{ release chan struct{} }
+
+func (w blockingWriter) Write(p []byte) (int, error) {
+	<-w.release
+	return len(p), nil
+}
+
 // TestNotifyAnswersWhileTheReceiptWriterIsStuck pins that receipts are off the
-// response path: with the writer blocked, a real HTTP client still gets its
-// 204 well inside the 5s timeout the notify runner uses.
+// response path: with the writer blocked and the log sink blocked too (a full
+// queue must not log from the handler), a real HTTP client still gets its 204
+// well inside the 5s timeout the notify runner uses.
 func TestNotifyAnswersWhileTheReceiptWriterIsStuck(t *testing.T) {
+	sink := blockingWriter{release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(sink.release) }) }
+	prevOut := log.Writer()
+	log.SetOutput(sink)
+	defer func() {
+		release()
+		log.SetOutput(prevOut)
+	}()
+
 	srv := newReceiptTestServer(t)
 	stuck := make(chan receiptEvent) // no writer: every send would block
 	srv.receiptCh = stuck
@@ -161,6 +183,7 @@ func TestNotifyAnswersWhileTheReceiptWriterIsStuck(t *testing.T) {
 	// Runs before ts.Close: if a regression makes the handler block on the
 	// send, unblock it so the test fails on the timeout instead of hanging.
 	defer func() {
+		release()
 		go func() {
 			for range stuck {
 			}
@@ -180,5 +203,32 @@ func TestNotifyAnswersWhileTheReceiptWriterIsStuck(t *testing.T) {
 		if resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("request %d: status %d", i, resp.StatusCode)
 		}
+	}
+}
+
+// TestLoadAllReceiptsReadsOnlyDaemonStores pins store discovery by exact name:
+// a token directory with glob metacharacters stays readable, and backups or
+// temp files never join the merge.
+func TestLoadAllReceiptsReadsOnlyDaemonStores(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "user[1]")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+	if err := RecordReceipt(storePath(dir, 18339), "venus", "codex", at); err != nil {
+		t.Fatal(err)
+	}
+	for _, stray := range []string{"notify-receipts-backup.json", "notify-receipts-0.json", "notify-receipts-018339.json"} {
+		if err := RecordReceipt(filepath.Join(dir, stray), "stray", "claude", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := LoadAllReceipts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Host != "venus" {
+		t.Fatalf("want only the daemon store's receipt, got %+v", got)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/session"
@@ -79,6 +80,7 @@ type Server struct {
 	mux               *http.ServeMux
 	textWriter        ClipboardTextWriter // nil until SetTextWriter; POST /clipboard/text answers 501 without it
 	receiptCh         chan receiptEvent   // nil until EnableDeliveryReceipts; drained by the single receipt writer
+	receiptDrops      atomic.Int64        // receipts dropped on a full queue; reported by the writer, never the handler
 	version           string              // reported by /health when set via SetVersion (#22 P2)
 }
 
@@ -122,11 +124,16 @@ type receiptEvent struct {
 func (s *Server) EnableDeliveryReceipts(path string) {
 	ch := make(chan receiptEvent, receiptQueueCap)
 	s.receiptCh = ch
-	go runReceiptWriter(path, ch)
+	go s.runReceiptWriter(path, ch)
 }
 
-func runReceiptWriter(path string, ch <-chan receiptEvent) {
+// runReceiptWriter is the only code that touches the store or logs about
+// receipts, so a stalled disk or log sink stalls it and nothing else.
+func (s *Server) runReceiptWriter(path string, ch <-chan receiptEvent) {
 	for ev := range ch {
+		if dropped := s.receiptDrops.Swap(0); dropped > 0 {
+			log.Printf("WARN: %d delivery receipts dropped: writer queue was full", dropped)
+		}
 		if err := RecordReceipt(path, ev.host, ev.target, ev.at); err != nil {
 			log.Printf("WARN: failed to record delivery receipt: %v", err)
 		}
@@ -146,7 +153,8 @@ func (s *Server) queueReceipt(host, target string) {
 	select {
 	case s.receiptCh <- receiptEvent{host: host, target: target, at: time.Now().UTC()}:
 	default:
-		log.Printf("WARN: delivery receipt dropped: writer queue full")
+		// Not a log line: a blocked log sink would hold up the response again.
+		s.receiptDrops.Add(1)
 	}
 }
 

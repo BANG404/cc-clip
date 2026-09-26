@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/token"
@@ -69,9 +71,18 @@ func ReceiptStorePath(port int) (string, error) {
 // acceptance per (Host, Target). An unreadable store is skipped and reported
 // in the error alongside whatever the others held.
 func LoadAllReceipts(dir string) ([]Receipt, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, receiptStorePrefix+"*"+receiptStoreSuffix))
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list receipt stores: %w", err)
+	}
+	var paths []string
+	for _, e := range entries {
+		if isReceiptStoreName(e.Name()) {
+			paths = append(paths, filepath.Join(dir, e.Name()))
+		}
 	}
 	newest := make(map[[2]string]Receipt)
 	var errs []error
@@ -93,6 +104,23 @@ func LoadAllReceipts(dir string) ([]Receipt, error) {
 		merged = append(merged, r)
 	}
 	return merged, errors.Join(errs...)
+}
+
+// isReceiptStoreName accepts exactly notify-receipts-<port>.json. Matching
+// names instead of globbing the joined path keeps a token directory containing
+// glob metacharacters readable, and keeps backups or temp files out of the
+// merge.
+func isReceiptStoreName(name string) bool {
+	port, ok := strings.CutPrefix(name, receiptStorePrefix)
+	if !ok {
+		return false
+	}
+	port, ok = strings.CutSuffix(port, receiptStoreSuffix)
+	if !ok || port == "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n > 0 && n <= 65535 && strconv.Itoa(n) == port
 }
 
 // LoadReceipts reads the receipt store. A missing file is no receipts, not an
