@@ -22,6 +22,8 @@
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#choose-a-target">Choose a target</a> ·
+  <a href="#what-you-can-do">What you can do</a> ·
+  <a href="#all-commands">All commands</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#documentation">Documentation</a>
 </p>
@@ -91,7 +93,7 @@ Choose one selector per setup. With no selector, cc-clip configures Claude Code.
 | All integrations | `cc-clip setup myserver --all` | Yes | Yes | Xvfb for Codex |
 | opencode | `cc-clip setup myserver --opencode` | Yes | Yes | `xclip` or `wl-paste` |
 | Antigravity | `cc-clip setup myserver --agy` | No | Yes | Notification integration only |
-| Cursor CLI | `cc-clip setup myserver --cursor` | Yes | No | `DISPLAY` or `WAYLAND_DISPLAY` set in Cursor's shell |
+| Cursor CLI | `cc-clip setup myserver --cursor` | Yes | Yes | `DISPLAY` or `WAYLAND_DISPLAY` set in Cursor's shell |
 
 For Codex targets, cc-clip tries to install Xvfb with `apt` or `dnf`. If
 passwordless `sudo` is unavailable, it stops and prints the exact install command;
@@ -109,7 +111,8 @@ a `DISPLAY` with no X server behind it would break clipboard fallback for every
 other tool in that shell. Cursor also stops waiting for clipboard helpers after
 about 4 seconds, so for large images over a slow link add
 `export CC_CLIP_FETCH_TIMEOUT_MS=3000` to your remote shell rc. Cursor
-notifications are not wired up yet.
+notifications come from a stop hook merged into `~/.cursor/hooks.json`; your
+own hooks in that file are kept.
 
 If a package manager already owns `cc-clip` on the remote, preserve that
 ownership with `cc-clip setup myserver --use-remote-bin`. Setup resolves
@@ -144,6 +147,140 @@ Windows support remains experimental. Start with the explicit upload-and-paste
 workflow in the [Windows Quick Start](docs/windows-quickstart.md). An opt-in
 direct RemoteForward transport also exists (since v0.9.1), but it is not the
 default.
+
+## What You Can Do
+
+Each feature below says what it does, why you would use it, how to turn it on,
+and what you should see when it works. Replace `myserver` with your host.
+
+### Paste an image into a remote agent
+
+- **What:** `Ctrl+V` in a remote Claude Code, opencode, Cursor, Kimi Code or
+  MastraCode session pastes the image on your local clipboard.
+- **Why:** the remote agent cannot see your Mac's clipboard. Without cc-clip
+  you would save the screenshot, `scp` it over, and type its path.
+- **How:** `cc-clip setup myserver` (add `--opencode` or `--cursor` for those
+  agents), then open a **new** `ssh myserver` and paste as usual.
+- **You'll see:** the agent attaches the image as it does locally, and your Mac
+  shows a `cc-clip #N` notification with the image's size and format, so a
+  missing or duplicated paste is easy to spot.
+
+### Paste an image into Codex CLI
+
+- **What:** the same `Ctrl+V`, for Codex.
+- **Why:** Codex reads the X11 clipboard directly instead of calling `xclip`,
+  so the shim above cannot reach it. cc-clip runs a private virtual display
+  (Xvfb) on the remote and serves your image from it.
+- **How:** `cc-clip setup myserver --codex` (or `--all` to keep Claude Code as
+  well), then open a new SSH session so the shell picks up the display setting.
+- **You'll see:** Codex attaches the image. If it does not, see the Codex entry
+  in [Troubleshooting](#troubleshooting).
+
+### Copy text from the remote to your local clipboard
+
+- **What:** text copied on the remote lands on your local clipboard.
+- **Why:** selecting text with the mouse copies what the terminal drew, so long
+  lines come back broken by soft-wrap newlines. Copying on the remote side
+  keeps the bytes exact.
+- **How:** pipe anything into `cc-clip copy` on the remote, or yank in
+  neovim / tmux copy-mode once they are set to use `xclip` or `wl-copy`
+  ([setup for each](docs/reverse-copy.md)):
+
+  ```bash
+  git diff | cc-clip copy
+  ```
+
+- **You'll see:** the text in your local clipboard, and a notification
+  "Clipboard set by remote". Its text never includes what was copied, and a
+  burst of yanks shows up as one notification.
+
+### Get a desktop notification when the agent needs you
+
+- **What:** your Mac notifies you when a remote agent finishes its turn or
+  waits for a tool approval.
+- **Why:** you can work in another window instead of watching the terminal.
+  Remote notifications do not normally cross SSH.
+- **How:** nothing extra: `setup` / `connect` wire the notification hook for
+  every target you selected ([details per CLI](docs/notifications.md)).
+- **You'll see:** for example a "Tool approval needed" notification carrying
+  Claude Code's own permission message. To confirm that notifications from a host actually arrive, run
+  `cc-clip doctor --host myserver` and read the `delivery-receipt` lines below.
+
+### Check that everything works
+
+- **What:** `cc-clip doctor --host myserver` tests every link from your
+  clipboard to the remote agent, and reports each check as `[pass]` or
+  `[FAIL]` with the reason.
+- **Why:** paste can fail at several points (daemon, SSH forward, token, shim,
+  PATH), and the fix differs for each.
+- **How:** copy an image locally, then run the command above on your local
+  machine.
+- **You'll see:** one line per check. Fix the first `[FAIL]`, the later ones
+  usually follow from it. The notification lines never fail the run; they tell
+  you when each CLI last delivered a notification from this host:
+
+  ```text
+    delivery-receipt:claude: [pass] last notification accepted 2h13m ago
+    delivery-receipt: [pass] never received from: cursor, opencode, agy (fine for any you do not use on this host)
+  ```
+
+### Keep your own `xclip` or `wl-paste`
+
+- **What:** cc-clip never overwrites a regular file at `~/.local/bin/xclip`,
+  `wl-paste` or `wl-copy` that it did not write. (A symlink there is replaced,
+  but the program it points to is left alone and becomes the shim's fallback.)
+- **Why:** that file may be your own wrapper or build; losing it silently would
+  break other tools.
+- **How:** if `connect` stops with `... already exists and was not written by
+  cc-clip`, either move the file away yourself, or let cc-clip set it aside:
+
+  ```bash
+  cc-clip connect myserver --adopt-foreign-shim
+  ```
+
+- **You'll see:** your program moved to `~/.local/bin/xclip.cc-clip-real`. The
+  shim hands every call it does not handle to that program, and `cc-clip
+  uninstall` on the remote moves it back.
+
+### Keep every host up to date
+
+- **What:** `cc-clip hosts list` shows each host this machine has deployed to,
+  with its cc-clip version and when it was last seen.
+- **Why:** the local and remote sides are upgraded separately; a host left on an
+  old version keeps the old shim and hooks.
+- **How:** upgrade locally, then redeploy each host:
+
+  ```bash
+  cc-clip update
+  cc-clip connect myserver --force
+  ```
+
+- **You'll see:** `cc-clip hosts list` reports the new version for that host.
+
+### Remove cc-clip from a host
+
+- **What:** undo what `setup` / `connect` installed.
+- **Why:** to stop using cc-clip on a host, or to start from a clean state.
+- **How:** removal happens in two places, because the shim lives on the
+  remote. Do the remote step first: the local step removes the PATH entry that
+  lets the remote shell find `cc-clip`.
+
+  ```bash
+  # 1. On the remote host: remove the shim and restore any adopted program.
+  #    A Wayland host needs --target wl-paste (this also covers wl-copy).
+  cc-clip uninstall
+
+  # 2. On your local machine: remove the managed Claude hooks and the PATH marker
+  cc-clip uninstall --host myserver
+  #    and, if you used Codex, its display and bridge
+  cc-clip uninstall --codex --host myserver
+  ```
+
+- **You'll see:** `Shim removed successfully.` on the remote. If another
+  process changed the shim or your program meanwhile, uninstall stops without
+  deleting anything and prints what it left where; run it again once the paths
+  are settled. On a Mac, step 2 also warns that there is no local shim to
+  remove; that is expected.
 
 ## How It Works
 
@@ -182,6 +319,7 @@ authentication material. `cc-clip connect` can wire:
 | Codex CLI | `notify` command | Task completion |
 | opencode | Generated plugin | Session idle |
 | Antigravity | Generated plugin | Agent stop |
+| Cursor CLI | Stop hook in `~/.cursor/hooks.json` | Turn finished |
 
 For adapter details, manual configuration, nonce registration, and diagnostics,
 see [SSH Notifications](docs/notifications.md).
@@ -201,25 +339,60 @@ Loopback is shared by users on the same remote host. The token file is mode
 account or reading your files. Read the explicit [threat model](SECURITY.md)
 before using cc-clip on a shared or untrusted host.
 
-## Essential Commands
+## All Commands
 
-| Command | Use it for |
+Every `cc-clip` command, grouped by the machine you run it on. The
+[commands reference](docs/commands.md) lists every flag.
+
+**On your local machine: set up and maintain hosts**
+
+| Command | What it does, and when to use it |
 |---|---|
-| `cc-clip setup HOST [target]` | First-time dependencies, SSH config, daemon, and deploy |
-| `cc-clip setup HOST --use-remote-bin` | Configure a host whose remote binary is package-managed |
-| `cc-clip connect HOST --force [target]` | Repair or fully redeploy a host |
-| `cc-clip connect HOST --token-only` | Sync a rotated or expired token |
-| `cc-clip doctor --host HOST` | End-to-end diagnosis |
-| `some-command \| cc-clip copy` (on the remote) | Copy remote output to your local clipboard, bypassing terminal soft-wrap |
-| Yank in neovim / tmux copy-mode on the remote | Lands on your local clipboard too — see [reverse copy](docs/reverse-copy.md) |
-| `cc-clip status` | Local component status |
-| `cc-clip hosts list` | Known-host registry |
-| `cc-clip update --check` | Check the published release channel |
-| `cc-clip update` | Install the latest published release |
+| `cc-clip setup HOST [target]` | First-time setup of one host: checks local dependencies, adds the SSH `RemoteForward`, starts the daemon, deploys. Start here. |
+| `cc-clip connect HOST [target]` | Deploys (or re-deploys) cc-clip to a host that is already set up. Only changed parts are re-sent. |
+| `cc-clip connect HOST --force` | Full redeploy, ignoring what the host reports. Use after `cc-clip update`, or when a host is broken. |
+| `cc-clip connect HOST --token-only` | Sends only the current token. Use when paste stops with a token error after the daemon restarted. |
+| `cc-clip connect HOST --adopt-foreign-shim` | Lets the deploy set aside an `xclip` / `wl-paste` / `wl-copy` it did not write, instead of stopping. See [Keep your own `xclip`](#keep-your-own-xclip-or-wl-paste). |
+| `cc-clip hosts list` | Shows every host this machine has deployed to, with its version, Codex status and last-seen time. Use it to find hosts to redeploy after an update. |
+| `cc-clip hosts forget HOST` | Removes a host from that list. The remote is not touched. |
+| `cc-clip uninstall --host HOST` | Removes the managed Claude hooks and the PATH marker from a host. Run `cc-clip uninstall` on the host first; see [Remove cc-clip](#remove-cc-clip-from-a-host). |
+| `cc-clip uninstall --codex --host HOST` | Removes Codex support from a host: stops the bridge and Xvfb, strips the Codex `notify` entry and the display setting. |
 
-Run `cc-clip --help` for the authoritative command list. The
-[commands guide](docs/commands.md) covers the common flags and environment
-variables.
+**On your local machine: the daemon and your own install**
+
+| Command | What it does, and when to use it |
+|---|---|
+| `cc-clip serve` | Runs the clipboard daemon in the foreground. Needed on Linux as a local machine; macOS and Windows use the service below. `--rotate-token` forces a new token. |
+| `cc-clip service install` / `uninstall` / `status` | Starts the daemon at login (macOS launchd, Windows logon), removes it, or shows its state. `setup` installs it for you. |
+| `cc-clip status` | Shows whether the daemon runs, which port it uses, and whether a token exists. A quick local check. |
+| `cc-clip doctor` | Checks the local side only. |
+| `cc-clip doctor --host HOST` | Checks the whole path to a host and shows when notifications last arrived. The first thing to run when paste fails. |
+| `cc-clip update` | Installs the latest release on this machine (macOS / Linux). `--check` only reports; `--to vX.Y.Z` picks a version. Then run `connect HOST --force` for each host. |
+| `cc-clip version` / `help` | Prints the version, or the built-in command list. |
+
+**On Windows (experimental)**
+
+| Command | What it does, and when to use it |
+|---|---|
+| `cc-clip send [HOST] [FILE]` | Uploads the clipboard image, or a file, to the host and prints its remote path. `--paste` also types that path into the active window. |
+| `cc-clip hotkey [HOST]` | Runs a global hotkey (default `Alt+Shift+V`) that does `send --paste` in one keystroke. `--enable-autostart`, `--status`, `--stop` manage it. See the [Windows Quick Start](docs/windows-quickstart.md). |
+
+**On the remote host**
+
+| Command | What it does, and when to use it |
+|---|---|
+| `some-command \| cc-clip copy` | Puts the piped text on your **local** clipboard, byte for byte. Use it instead of mouse selection for anything longer than a line. |
+| `cc-clip uninstall` | Removes the clipboard shim on this host and puts back a program adopted with `--adopt-foreign-shim`. Add `--target wl-paste` on a Wayland host. |
+| `cc-clip notify --title T --body B` | Sends your own notification to your local desktop, for example at the end of a long script. Its title starts with `[unverified]` unless you add `--trusted`. |
+| `cc-clip paste` | Saves the local clipboard image to a file on the remote and prints its path. For scripts and tools that take an image path instead of a paste. |
+
+**Used by cc-clip itself** (you do not need to run these)
+
+| Command | Purpose |
+|---|---|
+| `cc-clip install` | Installs the shim; `connect` runs it on the remote. |
+| `cc-clip plugin run NAME` | The notification hook each agent calls (`claude-notify`, `codex-notify`, `opencode-notify`, `agy-notify`, `cursor-notify`). |
+| `cc-clip x11-bridge` | Serves the clipboard to Codex through Xvfb; `connect --codex` starts it. |
 
 ### Configuration
 

@@ -30,8 +30,9 @@ Image paste notifications help you track what was pasted without leaving your wo
 | Codex CLI | ✅ If a Codex target (`--codex`/`--all`) is selected and `~/.codex/` exists | `notify` written into `~/.codex/config.toml` (a pre-existing top-level `notify` is left untouched) |
 | opencode | ✅ If an opencode target (`--opencode`/`--all`) is selected and opencode is detected ¹ | Plugin dropped into `~/.config/opencode/plugins/` |
 | Antigravity (agy) | ✅ If an Antigravity target (`--agy`/`--all`) is selected and agy is detected ¹ | `agy-notify` plugin installed via the `agy` CLI |
+| Cursor CLI | ✅ If a Cursor target (`--cursor`/`--all`) is selected and Cursor is detected ¹ | Stop hook merged into `~/.cursor/hooks.json` (your own hooks there are kept) |
 
-¹ "Wired" means `cc-clip connect` installs the integration. Plugin generation and runner paths are covered by tests, but host event delivery for opencode and Antigravity has not yet been smoke-verified on a representative host — please report issues.
+¹ "Wired" means `cc-clip connect` installs the integration. Plugin generation and runner paths are covered by tests, but host event delivery for opencode, Antigravity and Cursor has not yet been smoke-verified on a representative host. `cc-clip doctor --host <host>` shows when each of them last delivered a notification, so you can confirm it on your own machine — please report issues.
 
 ## Setup (Claude Code)
 

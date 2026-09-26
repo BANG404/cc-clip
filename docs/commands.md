@@ -1,6 +1,6 @@
 # Commands Reference
 
-Complete cc-clip command reference. For the 10 most common commands, see the [Commands section of the README](../README.md#commands).
+Complete cc-clip command reference. For what each feature is for and what you should see when it works, see [What You Can Do](../README.md#what-you-can-do); for a one-line purpose of every command, see [All Commands](../README.md#all-commands).
 
 ## Local daemon
 
@@ -11,6 +11,11 @@ Complete cc-clip command reference. For the 10 most common commands, see the [Co
 | `cc-clip service install` | Install local daemon service (macOS launchd / Windows logon launcher) |
 | `cc-clip service uninstall` | Remove local daemon service |
 | `cc-clip service status` | Show service status |
+| `cc-clip status` | Show daemon, port and token status |
+| `cc-clip update` | Install the latest release on this machine (macOS / Linux); then run `connect <host> --force` per host |
+| `cc-clip update --check` | Only report whether a newer release exists |
+| `cc-clip update --to vX.Y.Z` | Install a specific version |
+| `cc-clip update --force` | Re-install even at the target version; ignore another daemon on the same port |
 
 ## Setup and deploy
 
@@ -32,8 +37,15 @@ Complete cc-clip command reference. For the 10 most common commands, see the [Co
 | `cc-clip connect <host> --auto-recover` | Recover from v0.7.0 wrapper corruption + reinstall (mutex with --token-only) |
 | `cc-clip setup <host> --auto-recover` | Same recovery flow via setup path |
 | `cc-clip connect <host> --force` | Full redeploy ignoring cache |
-| `cc-clip uninstall` | Remove local xclip shim only |
-| `cc-clip uninstall --host <host>` | Remove from remote: Claude managed hooks/wrapper, PATH marker (local shim best-effort) |
+| `cc-clip connect <host> --adopt-foreign-shim` | If a regular file cc-clip did not write occupies `xclip` / `wl-paste` / `wl-copy` in `~/.local/bin`, move it to `<path>.cc-clip-real` and fall back to it instead of refusing. Connect-only: `setup` does not pass it on |
+| `cc-clip connect <host> --no-notify` | Deploy without notification setup (nonce sync and agent hooks) |
+| `cc-clip connect <host> --no-hooks` / `--hooks` | Persistently disable / re-enable Claude Code hook injection |
+| `cc-clip connect <host> --local-bin <path>` | Deploy this pre-downloaded remote binary instead of fetching one |
+| `cc-clip connect <host> --port <n>` | Use a tunnel port other than 18339 |
+| `cc-clip hosts list` | Show hosts this machine has deployed to (version, Codex, last seen) |
+| `cc-clip hosts forget <host>` | Stop tracking a host locally; the remote is not touched |
+| `cc-clip uninstall` | **On the remote host:** remove the clipboard shim and restore a program adopted with `--adopt-foreign-shim`. `--target wl-paste` on Wayland (also covers `wl-copy`); `--path` for a non-default install directory |
+| `cc-clip uninstall --host <host>` | **On your local machine:** remove the managed Claude hooks/wrapper and the PATH marker from the remote. Run the remote `cc-clip uninstall` first. Also tries a local shim, which warns harmlessly on a Mac |
 | `cc-clip uninstall --codex` | Remove Codex support (local) |
 | `cc-clip uninstall --codex --host <host>` | Remove Codex support from remote |
 
@@ -50,11 +62,18 @@ Complete cc-clip command reference. For the 10 most common commands, see the [Co
 | `cc-clip hotkey --status` | Windows: show hotkey status |
 | `cc-clip hotkey --stop` | Windows: stop the hotkey listener |
 
+## On the remote host
+
+| Command | Description |
+|---------|-------------|
+| `some-command \| cc-clip copy` | Put the piped text on your local clipboard verbatim ([reverse copy](reverse-copy.md)) |
+| `cc-clip paste` | Save the local clipboard image to a remote file and print its path (`--out-dir` to choose where, `--port` for a non-default tunnel port) |
+
 ## Notifications
 
 | Command | Description |
 |---------|-------------|
-| `cc-clip notify --title T --body B` | Send a generic notification through the tunnel |
+| `cc-clip notify --title T --body B` | Send a generic notification through the tunnel; titled `[unverified] T` unless `--trusted`. Set the port with `CC_CLIP_PORT` (there is no `--port` flag) |
 | `cc-clip notify --from-codex "$1"` | Parse Codex JSON arg and notify |
 | `cc-clip notify --from-codex-stdin` | Read Codex JSON from stdin and notify |
 
@@ -66,9 +85,17 @@ and tmux copy-mode — is covered in [reverse copy](reverse-copy.md).
 | Command | Description |
 |---------|-------------|
 | `cc-clip doctor` | Local health check |
-| `cc-clip doctor --host <host>` | End-to-end health check |
+| `cc-clip doctor --host <host>` | End-to-end health check, including when each agent last delivered a notification (`delivery-receipt` lines, never a failure) |
 | `cc-clip status` | Show component status |
 | `cc-clip version` | Show version |
+
+## Internal (run by cc-clip itself)
+
+| Command | Description |
+|---------|-------------|
+| `cc-clip install` | Install the shim; `connect` runs it on the remote (`--target`, `--path`, `--port`, `--adopt-foreign-shim`) |
+| `cc-clip plugin run <name>` | Notification hook each agent calls: `claude-notify`, `codex-notify`, `opencode-notify`, `agy-notify`, `cursor-notify` |
+| `cc-clip x11-bridge` | Serve the clipboard to Codex through Xvfb; started by `connect --codex` |
 
 ## Environment variables
 
