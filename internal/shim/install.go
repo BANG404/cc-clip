@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -192,30 +193,33 @@ func InstallWithOptions(target Target, installDir string, port int, opts Install
 	// registers its undo, and any later failure replays them newest first: an
 	// adopted program moved aside and never moved back is exactly the loss the
 	// adopt path promises not to cause.
-	var rollback []func()
+	var rollback []func() error
 	fail := func(err error) (InstallResult, error) {
+		errs := []error{err}
 		for i := len(rollback) - 1; i >= 0; i-- {
-			rollback[i]()
+			if rbErr := rollback[i](); rbErr != nil {
+				errs = append(errs, fmt.Errorf("rollback incomplete: %w", rbErr))
+			}
 		}
-		return InstallResult{}, err
+		return InstallResult{}, errors.Join(errs...)
 	}
 	if applyShim != nil {
 		if err := applyShim(); err != nil {
 			return InstallResult{}, err
 		}
-		rollback = append(rollback, func() { _ = os.Rename(shimDelegate, shimPath) })
+		rollback = append(rollback, func() error { return os.Rename(shimDelegate, shimPath) })
 	}
 	if applyWlCopy != nil {
 		if err := applyWlCopy(); err != nil {
 			return fail(err)
 		}
-		rollback = append(rollback, func() { _ = os.Rename(wlCopyDelegate, wlCopyPath) })
+		rollback = append(rollback, func() error { return os.Rename(wlCopyDelegate, wlCopyPath) })
 	}
 
 	if err := writeShim(shimPath, shimContent); err != nil {
 		return fail(err)
 	}
-	rollback = append(rollback, func() { _ = os.Remove(shimPath) })
+	rollback = append(rollback, func() error { return os.Remove(shimPath) })
 
 	// Wayland writes go through wl-copy, a separate binary from wl-paste, so
 	// the wayland target ships a write-side companion shim (#128 phase 2).

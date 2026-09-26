@@ -329,3 +329,27 @@ func TestInstallAdoptsForeignFileOnConsent(t *testing.T) {
 		t.Error("the shim was not installed at the original path")
 	}
 }
+
+// TestInstallReportsAnIncompleteRollback pins that a failed undo is surfaced:
+// the user must learn their program is still at the .cc-clip-real path.
+func TestInstallReportsAnIncompleteRollback(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "xclip")
+	if err := os.WriteFile(victim, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realWrite := writeShim
+	t.Cleanup(func() { writeShim = realWrite })
+	writeShim = func(path, content string) error {
+		// Make the undo impossible, then fail the write that triggers it.
+		if err := os.Remove(victim + AdoptedSuffix); err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("injected write failure")
+	}
+
+	_, err := InstallWithOptions(TargetXclip, dir, 18339, InstallOptions{AdoptForeign: true})
+	if err == nil || !strings.Contains(err.Error(), "rollback incomplete") {
+		t.Fatalf("a failed undo must be reported, got: %v", err)
+	}
+}
