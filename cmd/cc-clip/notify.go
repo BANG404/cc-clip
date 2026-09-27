@@ -508,34 +508,27 @@ func claudeHookConfigJSON() string {
 
 // cmdNotify sends a generic notification to the local cc-clip daemon.
 func cmdNotify() {
-	fs := flag.NewFlagSet("notify", flag.ExitOnError)
-	title := fs.String("title", "", "notification title")
-	body := fs.String("body", "", "notification body")
-	urgency := fs.Int("urgency", 1, "notification urgency (0=low, 1=normal, 2=critical)")
-	sound := fs.String("sound", "", "macOS notification sound")
-	trusted := fs.Bool("trusted", false, "mark this notification as trusted")
-	fromCodex := fs.String("from-codex", "", "Codex notify JSON payload")
-	fromCodexStdin := fs.Bool("from-codex-stdin", false, "read Codex notify JSON payload from stdin")
+	fs, f := newNotifyFlagSet(flag.ExitOnError, getPort())
 	_ = fs.Parse(os.Args[2:])
 
 	msg := daemon.GenericMessagePayload{
-		Title:    *title,
-		Body:     *body,
-		Urgency:  *urgency,
-		Sound:    *sound,
-		Verified: *trusted,
+		Title:    *f.title,
+		Body:     *f.body,
+		Urgency:  *f.urgency,
+		Sound:    *f.sound,
+		Verified: *f.trusted,
 	}
 
 	switch {
-	case *fromCodex != "" && *fromCodexStdin:
+	case *f.fromCodex != "" && *f.fromCodexStdin:
 		log.Fatal("notify failed: --from-codex and --from-codex-stdin are mutually exclusive")
-	case *fromCodex != "":
-		parsed, err := parseCodexNotifyPayload(*fromCodex)
+	case *f.fromCodex != "":
+		parsed, err := parseCodexNotifyPayload(*f.fromCodex)
 		if err != nil {
 			log.Fatalf("invalid codex notify payload: %v", err)
 		}
 		msg = parsed
-	case *fromCodexStdin:
+	case *f.fromCodexStdin:
 		payload, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			log.Fatalf("failed to read codex payload from stdin: %v", err)
@@ -547,24 +540,48 @@ func cmdNotify() {
 		msg = parsed
 	}
 
-	if *sound != "" {
-		msg.Sound = *sound
+	if *f.sound != "" {
+		msg.Sound = *f.sound
 	}
-	if *trusted {
+	if *f.trusted {
 		msg.Verified = true
 	}
 
 	// The --from-codex forms are Codex's own notify contract, so they attribute
 	// the delivery receipt; a hand-run notification stays unattributed.
 	target := ""
-	if *fromCodex != "" || *fromCodexStdin {
+	if *f.fromCodex != "" || *f.fromCodexStdin {
 		target = "codex"
 	}
 
-	port := getPort()
-	if err := postGenericNotification(port, target, msg); err != nil {
+	if err := postGenericNotification(*f.port, target, msg); err != nil {
 		log.Fatalf("notify failed: %v", err)
 	}
+}
+
+// notifyFlags holds the parsed values of `cc-clip notify`.
+type notifyFlags struct {
+	title, body, sound, fromCodex *string
+	urgency, port                 *int
+	trusted, fromCodexStdin       *bool
+}
+
+// newNotifyFlagSet defines notify's flags. --port defaults to defaultPort
+// (CC_CLIP_PORT or 18339) so an explicit flag wins and a non-numeric value is
+// rejected instead of ignored.
+func newNotifyFlagSet(errorHandling flag.ErrorHandling, defaultPort int) (*flag.FlagSet, notifyFlags) {
+	fs := flag.NewFlagSet("notify", errorHandling)
+	f := notifyFlags{
+		title:          fs.String("title", "", "notification title"),
+		body:           fs.String("body", "", "notification body"),
+		urgency:        fs.Int("urgency", 1, "notification urgency (0=low, 1=normal, 2=critical)"),
+		sound:          fs.String("sound", "", "macOS notification sound"),
+		trusted:        fs.Bool("trusted", false, "mark this notification as trusted"),
+		fromCodex:      fs.String("from-codex", "", "Codex notify JSON payload"),
+		fromCodexStdin: fs.Bool("from-codex-stdin", false, "read Codex notify JSON payload from stdin"),
+		port:           fs.Int("port", defaultPort, "daemon port (env: CC_CLIP_PORT)"),
+	}
+	return fs, f
 }
 
 // parseCodexNotifyPayload extracts a GenericMessagePayload from the Codex

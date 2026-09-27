@@ -196,7 +196,7 @@ On the remote host (copy, notify and paste need the tunnel of an open ssh sessio
     --trusted            Suppress the [unverified] title prefix
     --from-codex         Parse Codex JSON payload (extracts last-assistant-message)
     --from-codex-stdin   Read Codex JSON payload from stdin (mutually exclusive with --from-codex)
-                         Port: set CC_CLIP_PORT (default: 18339); notify has no --port flag
+    --port               Daemon port (default: 18339, env: CC_CLIP_PORT)
   paste              Save the local clipboard image to a remote file and print its path
     --out-dir        Output directory (env: CC_CLIP_OUT_DIR)
     --port           Tunnel port (default: 18339)

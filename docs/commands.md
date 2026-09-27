@@ -73,7 +73,7 @@ Complete cc-clip command reference. For what each feature is for and what you sh
 
 | Command | Description |
 |---------|-------------|
-| `cc-clip notify --title T --body B` | Send a generic notification through the tunnel; titled `[unverified] T` unless `--trusted`. Set the port with `CC_CLIP_PORT` (there is no `--port` flag) |
+| `cc-clip notify --title T --body B` | Send a generic notification through the tunnel; titled `[unverified] T` unless `--trusted`; `--port` (or `CC_CLIP_PORT`) for a non-default port |
 | `cc-clip notify --from-codex "$1"` | Parse Codex JSON arg and notify |
 | `cc-clip notify --from-codex-stdin` | Read Codex JSON from stdin and notify |
 
