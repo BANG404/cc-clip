@@ -939,13 +939,18 @@ func prepareBinaryLocal(host, remoteOS, remoteArch string) (localBin string, err
 	}
 
 	tmpBin := filepath.Join(os.TempDir(), fmt.Sprintf("cc-clip-%s-%s", remoteOS, remoteArch))
-	buildCmd := exec.Command("go", "build", "-o", tmpBin, "./cmd/cc-clip/")
+	buildCmd := exec.Command("go", crossCompileArgs(tmpBin, version)...)
 	buildCmd.Dir = srcDir
 	buildCmd.Env = append(os.Environ(), "GOOS="+remoteOS, "GOARCH="+remoteArch)
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cross-compile failed: %s: %w", string(out), err)
 	}
 	return tmpBin, nil
+}
+
+func crossCompileArgs(outputPath, buildVersion string) []string {
+	ldflags := fmt.Sprintf("-s -w -X main.version=%s", buildVersion)
+	return []string{"build", "-ldflags", ldflags, "-o", outputPath, "./cmd/cc-clip/"}
 }
 
 // releaseVersion extracts the base release version from a git describe string.
