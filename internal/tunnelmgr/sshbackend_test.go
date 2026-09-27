@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -113,7 +114,10 @@ func TestNewEmptyControlConfigIsPrivateAndEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != 0 || info.Mode().Perm() != stateFileMode {
-		t.Fatalf("empty config size/mode = %d/%o, want 0/%o", info.Size(), info.Mode().Perm(), stateFileMode)
+	if info.Size() != 0 {
+		t.Fatalf("empty config size = %d, want 0", info.Size())
+	}
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != stateFileMode {
+		t.Fatalf("empty config mode = %o, want %o", got, stateFileMode)
 	}
 }

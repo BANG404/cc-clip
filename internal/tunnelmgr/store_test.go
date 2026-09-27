@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -39,14 +40,14 @@ func TestStoreRoundTripAndFileMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if got := info.Mode().Perm(); got != stateFileMode {
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != stateFileMode {
 		t.Fatalf("state file mode = %o, want %o (may contain SSH target names)", got, stateFileMode)
 	}
 	dirInfo, err := os.Stat(filepath.Dir(path))
 	if err != nil {
 		t.Fatalf("stat dir: %v", err)
 	}
-	if got := dirInfo.Mode().Perm(); got != stateDirMode {
+	if got := dirInfo.Mode().Perm(); runtime.GOOS != "windows" && got != stateDirMode {
 		t.Fatalf("state dir mode = %o, want %o", got, stateDirMode)
 	}
 
