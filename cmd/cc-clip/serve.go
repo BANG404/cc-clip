@@ -63,10 +63,7 @@ func cmdServe() {
 	if err != nil {
 		log.Fatalf("failed to resolve cc-clip state directory: %v", err)
 	}
-	instanceID, err := instanceid.LoadOrCreate(tokenDir)
-	if err != nil {
-		log.Fatalf("failed to load or create instance identity: %v", err)
-	}
+	instanceID := loadInstanceIDOrUnavailable(tokenDir)
 
 	srv.SetTextWriter(daemon.NewClipboardTextWriter())
 	srv.SetVersion(version)
@@ -108,4 +105,13 @@ func cmdServe() {
 	if err := srv.ServeListener(listener); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func loadInstanceIDOrUnavailable(tokenDir string) string {
+	instanceID, err := instanceid.LoadOrCreate(tokenDir)
+	if err != nil {
+		log.Printf("WARN: tunnel identity unavailable: %v", err)
+		return ""
+	}
+	return instanceID
 }

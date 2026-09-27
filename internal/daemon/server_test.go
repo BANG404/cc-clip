@@ -161,6 +161,19 @@ func TestTunnelIdentityRequiresTokenAndReportsInstance(t *testing.T) {
 	}
 }
 
+func TestTunnelIdentityReturnsUnavailableWithoutInstance(t *testing.T) {
+	srv, sess := newTestServer(&mockClipboard{})
+	req := httptest.NewRequest("GET", "/tunnel/identity", nil)
+	req.Header.Set("Authorization", "Bearer "+sess)
+	req.Header.Set("User-Agent", "cc-clip")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("identity status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestRegisterNotificationNonceCapsRegistry(t *testing.T) {
 	srv, _ := newTestServer(&mockClipboard{})
 

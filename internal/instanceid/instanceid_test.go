@@ -3,6 +3,7 @@ package instanceid
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -25,6 +26,64 @@ func TestLoadOrCreateIsStableAndPrivate(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("instance-id mode = %o, want 600", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != fileName {
+		t.Fatalf("unexpected files after instance-id creation: %v", entries)
+	}
+}
+
+func TestLoadOrCreateConcurrentCallersShareIdentity(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cache")
+	const callers = 32
+
+	start := make(chan struct{})
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			id, err := LoadOrCreate(dir)
+			ids <- id
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(ids)
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("LoadOrCreate failed: %v", err)
+		}
+	}
+	var want string
+	for id := range ids {
+		if want == "" {
+			want = id
+		}
+		if id != want {
+			t.Fatalf("concurrent callers returned different IDs: got %q, want %q", id, want)
+		}
+	}
+}
+
+func TestLoadOrCreateRejectsIncompleteExistingIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, fileName)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadOrCreate(dir); err == nil {
+		t.Fatal("LoadOrCreate accepted an incomplete instance-id file")
 	}
 }
 

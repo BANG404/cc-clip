@@ -35,26 +35,37 @@ func LoadOrCreate(dir string) (string, error) {
 		return "", fmt.Errorf("generate instance id: %w", err)
 	}
 	id := hex.EncodeToString(raw[:])
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp, err := os.CreateTemp(dir, fileName+".tmp-*")
 	if err != nil {
+		return "", fmt.Errorf("create temporary instance-id file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("secure temporary instance-id file: %w", err)
+	}
+	if _, err := tmp.WriteString(id + "\n"); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("write temporary instance-id file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("sync temporary instance-id file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close temporary instance-id file: %w", err)
+	}
+
+	// Publish only a fully written file. A hard link provides create-if-absent
+	// semantics without exposing a partially written final path. If another
+	// process wins the race, its linked file is already complete and safe to
+	// read; unlike rename, this never replaces an established installation ID.
+	if err := os.Link(tmpPath, path); err != nil {
 		if os.IsExist(err) {
 			return read(path)
 		}
-		return "", fmt.Errorf("create instance-id file: %w", err)
-	}
-	if _, err := f.WriteString(id + "\n"); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return "", fmt.Errorf("write instance-id file: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return "", fmt.Errorf("sync instance-id file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", fmt.Errorf("close instance-id file: %w", err)
+		return "", fmt.Errorf("publish instance-id file: %w", err)
 	}
 	return id, nil
 }
