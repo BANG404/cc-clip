@@ -420,27 +420,32 @@ func TestNewDeployStateDoesNotPreserveCodexWhenRequested(t *testing.T) {
 func TestConnectSuccessSummary(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		targets DeployTargets
-		want    string
+		name     string
+		targets  DeployTargets
+		noNotify bool
+		want     string
 	}{
-		{"claude mentions Claude Code", DeployTargets{Claude: true}, "remote Claude Code"},
-		{"all mentions Claude Code (codex line printed separately)", DeployTargets{Claude: true, Codex: true, Opencode: true, Antigravity: true, Cursor: true}, "remote Claude Code"},
-		{"opencode mentions opencode", DeployTargets{Opencode: true}, "remote opencode"},
-		{"pure codex does not claim the Claude shim", DeployTargets{Codex: true}, "Codex CLI clipboard support"},
-		{"agy mentions notifications + pending clipboard", DeployTargets{Antigravity: true}, "Antigravity notifications configured"},
-		{"cursor mentions Cursor and the DISPLAY prerequisite", DeployTargets{Cursor: true}, "DISPLAY"},
+		{"claude mentions Claude Code", DeployTargets{Claude: true}, false, "remote Claude Code"},
+		{"all mentions Claude Code (codex line printed separately)", DeployTargets{Claude: true, Codex: true, Opencode: true, Antigravity: true, Cursor: true}, false, "remote Claude Code"},
+		{"opencode mentions opencode", DeployTargets{Opencode: true}, false, "remote opencode"},
+		{"pure codex does not claim the Claude shim", DeployTargets{Codex: true}, false, "Codex CLI clipboard support"},
+		{"agy mentions notifications + pending clipboard", DeployTargets{Antigravity: true}, false, "Antigravity notifications configured"},
+		{"agy no-notify reports notifications skipped", DeployTargets{Antigravity: true}, true, "notifications skipped (--no-notify)"},
+		{"cursor mentions Cursor and the DISPLAY prerequisite", DeployTargets{Cursor: true}, false, "DISPLAY"},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := connectSuccessSummary(tt.targets)
+			got := connectSuccessSummary(tt.targets, tt.noNotify)
 			if !strings.Contains(got, tt.want) {
-				t.Fatalf("connectSuccessSummary(%+v) = %q, want substring %q", tt.targets, got, tt.want)
+				t.Fatalf("connectSuccessSummary(%+v, noNotify=%v) = %q, want substring %q", tt.targets, tt.noNotify, got, tt.want)
 			}
 			if !tt.targets.Claude && strings.Contains(got, "Claude Code") {
 				t.Fatalf("non-Claude target must not claim Claude Code: %q", got)
+			}
+			if tt.noNotify && strings.Contains(got, "notifications configured") {
+				t.Fatalf("--no-notify summary must not claim notifications were configured: %q", got)
 			}
 		})
 	}
