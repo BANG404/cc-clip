@@ -84,6 +84,27 @@ func rejectRemoteBinWithLocalBin(useRemoteBin bool, localBin string) {
 	os.Exit(2)
 }
 
+// setupConnectOnlyFlags are flags only connect acts on. setup deploys through
+// runConnect with host, port, targets, use-remote-bin and auto-recover alone,
+// so these would otherwise be accepted and silently ignored. --token-only is
+// included because setup reads it only to reject it next to --auto-recover.
+var setupConnectOnlyFlags = []string{"force", "token-only", "adopt-foreign-shim", "no-hooks", "hooks", "no-notify"}
+
+// setupRejectedConnectFlags names every connect-only flag present in setup's
+// args, each with the connect command that honours it.
+func setupRejectedConnectFlags(host string, args []string) error {
+	var lines []string
+	for _, name := range setupConnectOnlyFlags {
+		if flagInArgs(args, name) {
+			lines = append(lines, fmt.Sprintf("--%s is a connect flag; run \"cc-clip setup %s\" first, then \"cc-clip connect %s --%s\"", name, host, host, name))
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return fmt.Errorf("error: %s", strings.Join(lines, "\n       "))
+}
+
 func cmdConnect() {
 	if len(os.Args) < 3 {
 		log.Fatal("usage: cc-clip connect <host> [--port PORT] [--force] [--token-only] [--use-remote-bin] [--no-notify] [--no-hooks|--hooks]")
@@ -715,6 +736,10 @@ func cmdSetup() {
 	useRemoteBin := hasFlag("use-remote-bin")
 	rejectAutoRecoverWithTokenOnly("setup", autoRecover, tokenOnly)
 	rejectRemoteBinWithLocalBin(useRemoteBin, getFlag("local-bin", ""))
+	if err := setupRejectedConnectFlags(host, os.Args[2:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 
 	// Resolve deployment targets BEFORE any local dependency / daemon / SSH
 	// activity so the interactive menu (design §5) precedes any prompt, and a

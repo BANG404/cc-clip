@@ -121,3 +121,41 @@ func TestCLITargetMatrix(t *testing.T) {
 		})
 	}
 }
+
+// TestSetupRejectsConnectOnlyFlags pins that setup refuses the flags only
+// connect acts on, instead of accepting and silently ignoring them.
+func TestSetupRejectsConnectOnlyFlags(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		rejected string
+	}{
+		{"force", []string{"myhost", "--force"}, "--force"},
+		{"token-only", []string{"myhost", "--token-only"}, "--token-only"},
+		{"adopt-foreign-shim", []string{"myhost", "--adopt-foreign-shim"}, "--adopt-foreign-shim"},
+		{"no-hooks", []string{"myhost", "--no-hooks"}, "--no-hooks"},
+		{"hooks", []string{"myhost", "--hooks"}, "--hooks"},
+		{"no-notify", []string{"myhost", "--no-notify"}, "--no-notify"},
+		{"value form", []string{"myhost", "--force=true"}, "--force"},
+		{"accepted setup flags", []string{"myhost", "--port", "1", "--codex", "--all", "--use-remote-bin", "--local-bin", "x", "--auto-recover"}, ""},
+		{"disabled value form", []string{"myhost", "--force=false"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := setupRejectedConnectFlags("myhost", tc.args)
+			if tc.rejected == "" {
+				if err != nil {
+					t.Fatalf("setup flags must be accepted: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("%s must be rejected by setup", tc.rejected)
+			}
+			want := tc.rejected + ` is a connect flag; run "cc-clip setup myhost" first, then "cc-clip connect myhost ` + tc.rejected + `"`
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error must name %s and its connect command, got: %v", tc.rejected, err)
+			}
+		})
+	}
+}
