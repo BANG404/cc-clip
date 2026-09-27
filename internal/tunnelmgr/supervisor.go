@@ -297,7 +297,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			case identityState == tunnel.RemoteIdentityUnavailable:
 				err = s.transition(StateProbeUnavailable, remote, "remote tunnel identity helper or endpoint unavailable")
 			case identityState == tunnel.RemoteIdentityTokenInvalid:
-				err = s.transition(StateRemoteTokenInvalid, remote, "remote token rejected by local daemon")
+				err = s.transition(StateRemoteTokenInvalid, remote, fmt.Sprintf(
+					"remote token rejected by local daemon; run cc-clip connect %q --token-only from the local machine",
+					s.Spec.Host,
+				))
 			case identityState != tunnel.RemoteIdentityOK:
 				err = s.transition(StateRemoteUnknown, remote, "remote tunnel identity probe did not complete")
 			case identity.InstanceID != s.Spec.ExpectedInstanceID:
@@ -453,8 +456,17 @@ func (s *Supervisor) nextProbeInterval() time.Duration {
 }
 
 func (s *Supervisor) logTransition(oldState State) {
-	if s.Logf != nil && oldState != s.State() {
-		s.Logf("managed tunnel state: %s", s.State())
+	if s.Logf == nil {
+		return
+	}
+	s.mu.Lock()
+	state, lastErr := s.state, s.lastErr
+	s.mu.Unlock()
+	if oldState != state {
+		s.Logf("managed tunnel state: %s", state)
+		if state == StateRemoteTokenInvalid && lastErr != "" {
+			s.Logf("managed tunnel recovery: %s", lastErr)
+		}
 	}
 }
 

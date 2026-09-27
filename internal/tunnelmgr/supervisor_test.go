@@ -5,9 +5,11 @@ package tunnelmgr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,6 +224,72 @@ func TestSupervisorRequiresAuthenticatedExpectedIdentity(t *testing.T) {
 			t.Fatalf("persisted state = %q, want config-error", rec.Runtime.State)
 		}
 	})
+}
+
+func TestSupervisorTokenInvalidKeepsMasterAndRecoversInPlace(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "master")
+	t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:ok\n")
+	t.Setenv("FAKE_SSH_IDENTITY_OUT", "cc-clip-identity:token-invalid\n")
+	countFile := filepath.Join(t.TempDir(), "count")
+	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
+
+	sup, store := newTestSupervisor(t, 18399)
+	var logMu sync.Mutex
+	var logs []string
+	sup.Logf = func(format string, args ...any) {
+		logMu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		logMu.Unlock()
+	}
+	cancel, done := runSupervisor(t, sup)
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateRemoteTokenInvalid }, "remote-token-invalid")
+	controlPath := sup.Backend.ControlPath()
+	if controlPath == "" || !sup.Backend.Running() || !sup.Backend.Forwarded() {
+		t.Fatalf("token failure discarded tunnel: control=%q running=%v forwarded=%v", controlPath, sup.Backend.Running(), sup.Backend.Forwarded())
+	}
+	if got := fakeMasterStarts(countFile); got != 1 {
+		t.Fatalf("master starts while token invalid = %d, want 1", got)
+	}
+	wantCommand := `cc-clip connect "fake-host" --token-only`
+	var rec *Record
+	waitUntil(t, 5*time.Second, func() bool {
+		var err error
+		rec, err = store.Load()
+		return err == nil && rec.Runtime.State == StateRemoteTokenInvalid && strings.Contains(rec.Runtime.LastError, wantCommand)
+	}, "persisted token recovery guidance")
+	if !strings.Contains(rec.Runtime.LastError, wantCommand) {
+		t.Fatalf("token recovery detail = %q, want command %q", rec.Runtime.LastError, wantCommand)
+	}
+	logMu.Lock()
+	joinedLogs := strings.Join(logs, "\n")
+	logMu.Unlock()
+	if !strings.Contains(joinedLogs, wantCommand) {
+		t.Fatalf("token recovery log = %q, want command %q", joinedLogs, wantCommand)
+	}
+
+	// Simulate an external `connect --token-only` repair. The next identity
+	// probe must promote the same forward to healthy without respawning SSH.
+	t.Setenv("FAKE_SSH_IDENTITY_OUT", `cc-clip-identity:ok:{"service":"cc-clip","status":"ok","protocol_version":1,"instance_id":"instance-123"}`)
+	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateHealthy }, "healthy after token repair")
+	if got := sup.Backend.ControlPath(); got != controlPath {
+		t.Fatalf("control path changed during token repair: got %q, want %q", got, controlPath)
+	}
+	if got := fakeMasterStarts(countFile); got != 1 {
+		t.Fatalf("master starts after token repair = %d, want 1", got)
+	}
+}
+
+func fakeMasterStarts(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(data), "x")
 }
 
 func TestSupervisorPortConflictKeepsHealthyMaster(t *testing.T) {
