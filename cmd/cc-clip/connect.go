@@ -347,7 +347,7 @@ remote has a valid claude binary installed.
 			}
 		}
 
-		connectVerifyTunnel(session, port, host, opts.targets, remoteBin)
+		connectVerifyTunnel(session, port, host, opts.targets, remoteBin, opts.noNotify)
 
 		// Record this host even on the --token-only path so `hosts list` and
 		// per-host update reminders reflect the most recent successful sync.
@@ -609,7 +609,7 @@ remote has a valid claude binary installed.
 	}
 
 	// Step 7: Verify tunnel
-	connectVerifyTunnel(session, port, host, opts.targets, remoteBin)
+	connectVerifyTunnel(session, port, host, opts.targets, remoteBin, opts.noNotify)
 
 	// Notification bridge setup (unless --no-notify)
 	if !opts.noNotify {
@@ -825,7 +825,7 @@ func cmdSetup() {
 // prints its own readiness line from runConnectCodex, so a Codex-only run must
 // not claim the Claude shim is ready (it is deliberately not installed under
 // pure --codex).
-func connectSuccessSummary(t DeployTargets) string {
+func connectSuccessSummary(t DeployTargets, noNotify bool) string {
 	switch {
 	case t.Claude:
 		return "Setup complete. Ctrl+V in remote Claude Code will paste images from your local clipboard."
@@ -834,6 +834,9 @@ func connectSuccessSummary(t DeployTargets) string {
 	case t.Codex:
 		return "Setup complete. Codex CLI clipboard support is configured below."
 	case t.Antigravity:
+		if noNotify {
+			return "Setup complete. Antigravity notifications skipped (--no-notify); clipboard transport is pending."
+		}
 		return "Setup complete. Antigravity notifications configured; clipboard transport is pending."
 	case t.Cursor:
 		return "Setup complete. Ctrl+V in remote Cursor will paste images once DISPLAY is set (see the note above)."
@@ -872,7 +875,7 @@ func maybePrintCursorNotice(out io.Writer, t DeployTargets) {
 }
 
 // connectVerifyTunnel verifies the SSH tunnel from the remote side.
-func connectVerifyTunnel(session *shim.SSHSession, port int, host string, targets DeployTargets, remoteBin string) {
+func connectVerifyTunnel(session *shim.SSHSession, port int, host string, targets DeployTargets, remoteBin string, noNotify bool) {
 	fmt.Printf("[7/7] Verifying tunnel from remote...\n")
 	// Ask the daemon to identify itself through the forward rather than only
 	// completing a TCP handshake. A stale sshd from a previous session keeps
@@ -909,7 +912,7 @@ func connectVerifyTunnel(session *shim.SSHSession, port int, host string, target
 	maybePrintCursorNotice(os.Stdout, targets)
 
 	fmt.Println()
-	fmt.Println(connectSuccessSummary(targets))
+	fmt.Println(connectSuccessSummary(targets, noNotify))
 }
 
 // prepareBinaryLocal resolves the local binary path without performing remote operations.
