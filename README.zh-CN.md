@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md @ befc99e90ceb3323cbf32fdb53f9c81a426da032 -->
+<!-- i18n-source: README.md @ a6e618336aa17b7664a308398ae10e5e05c7fcb4 -->
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -132,6 +132,11 @@ hook 会被保留。
 > Kimi Code 和 MastraCode 通过 shim 会拦截的 `wl-paste` / `xclip` 调用读取
 > 剪贴板，因此使用默认目标即可粘贴图片。这一点已通过对照其源码的静态核对和
 > shim 测试验证，尚未用真实 CLI 做端到端验证。
+>
+> Grok Build（xAI 的 `grok` CLI）和 Codex 一样在进程内直接读取 X11 剪贴板，因此它通过
+> Codex 目标粘贴：使用 `--codex`，若还要保留 Claude Code 则用 `--all`。这一点已对照其源码
+> 静态核实，尚未做端到端验证。Grok Build 读取剪贴板约 2 秒后就会放弃，因此在慢速链路上
+> 传大图时，图片可能来不及送达。
 
 ### 其他本地平台
 
@@ -163,12 +168,12 @@ Windows 支持仍处于实验阶段。请先使用 [Windows 快速开始](docs/w
 
 ### 把图片粘贴到 Codex CLI
 
-- **作用：**同样的 `Ctrl+V`，用于 Codex。
-- **为什么：**Codex 直接读取 X11 剪贴板，不调用 `xclip`，上面的 shim 够不到它。
+- **作用：**同样的 `Ctrl+V`，用于 Codex 和 Grok Build。
+- **为什么：**Codex 和 Grok Build 直接读取 X11 剪贴板，不调用 `xclip`，上面的 shim 够不到它们。
   cc-clip 会在远程运行一个私有的虚拟显示（Xvfb），从那里提供你的图片。
 - **怎么用：**运行 `cc-clip setup myserver --codex`（若还要保留 Claude Code，用
   `--all`），然后打开新的 SSH 会话，让 shell 读入显示设置。
-- **你会看到：**Codex 附上图片。如果没有，请看[故障排查](#故障排查)中关于 Codex
+- **你会看到：**代理附上图片。如果没有，请看[故障排查](#故障排查)中关于 Codex
   的条目。
 
 ### 把远程的文本复制到本地剪贴板
