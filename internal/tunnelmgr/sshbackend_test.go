@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/shunmei/cc-clip/internal/shim"
 )
 
 // TestMasterArgs pins the exact ssh invocation of the managed master. The
@@ -71,8 +73,8 @@ func TestProbeArgs(t *testing.T) {
 	if strings.Contains(joined, "-R") || strings.Contains(joined, "-N") {
 		t.Errorf("probe argv must not carry forwarding flags: %q", args)
 	}
-	if args[len(args)-1] != cmd {
-		t.Errorf("probe command must be the final argument, got %q", args[len(args)-1])
+	if got, want := args[len(args)-1], shim.WrapRemoteShell(cmd); got != want {
+		t.Errorf("probe command must be wrapped as the final argument\n got: %q\nwant: %q", got, want)
 	}
 	if args[len(args)-2] != "example-host" {
 		t.Errorf("probe target host wrong: %q", args)

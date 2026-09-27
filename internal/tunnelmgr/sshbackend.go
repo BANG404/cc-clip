@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shunmei/cc-clip/internal/shim"
 	"github.com/shunmei/cc-clip/internal/tunnel"
 )
 
@@ -375,7 +376,7 @@ func (b *Backend) probeArgs(config, controlPath, remoteCmd string) []string {
 		"-S", controlPath,
 		"-o", "BatchMode=yes",
 		"-o", "ClearAllForwardings=yes",
-		"--", b.Spec.Host, remoteCmd,
+		"--", b.Spec.Host, shim.WrapRemoteShell(remoteCmd),
 	}
 }
 
