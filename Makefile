@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
-.PHONY: build test vet clean release-local release-preflight release-notes-check
+.PHONY: build test vet clean release-local release-preflight release-notes-check i18n-check
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/cc-clip/
@@ -92,3 +92,8 @@ release-notes-check:
 		exit 1; \
 	}
 	@echo "release notes OK: docs/release-notes/$(V).md"
+
+# Translations start with <!-- i18n-source: <path> @ <sha> -->. Fails when the
+# English source changed after that SHA (docs/i18n/TRANSLATION_BRIEF.md).
+i18n-check:
+	@bash scripts/check-i18n-markers.sh

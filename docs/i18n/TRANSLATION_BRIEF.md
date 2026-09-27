@@ -139,6 +139,8 @@ If the English source changes and the translation has not been updated:
 2. Open a translation-update PR that actually propagates the English change into the translation, then update the marker.
 3. The CI (final i18n step) will block merges on a marker SHA that does not match the canonical file's latest.
 
+This check exists: `make i18n-check` (`scripts/check-i18n-markers.sh`, run by the `test` job in `.github/workflows/checks.yml`). It fails when a marker SHA is not a full commit SHA in the history of HEAD, or when `git log <sha>..HEAD -- <source>` is non-empty, and it prints the source commits the translation is missing. When a PR changes an English source, update its translations in the same PR and set their marker to the commit that changed the source; PRs merge with `--merge`, so that SHA survives the merge.
+
 ## Expressly non-goals
 
 - **Not goal**: Translate once and freeze. Translations are expected to follow English every time it changes meaningfully.
