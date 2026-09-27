@@ -447,6 +447,21 @@ func TestConnectSuccessSummary(t *testing.T) {
 	}
 }
 
+func TestCrossCompileArgsInjectVersion(t *testing.T) {
+	args := crossCompileArgs("/tmp/cc-clip-linux-amd64", "v1.2.3-4-gabcdef-dirty")
+	joined := strings.Join(args, "\x00")
+	for _, want := range []string{
+		"build",
+		"-ldflags\x00-s -w -X main.version=v1.2.3-4-gabcdef-dirty",
+		"-o\x00/tmp/cc-clip-linux-amd64",
+		"./cmd/cc-clip/",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("crossCompileArgs() = %q, missing %q", args, want)
+		}
+	}
+}
+
 func TestReleaseVersion(t *testing.T) {
 	tests := []struct {
 		input string
