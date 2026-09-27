@@ -134,6 +134,12 @@ binaries. The flag cannot be combined with `--local-bin` in the same run.
 > invocations the shim intercepts, so image paste should work with the default
 > target. This is verified statically against their source and by shim tests,
 > not yet end to end with the real CLIs.
+>
+> Grok Build (xAI's `grok` CLI) reads the X11 clipboard in-process, the same way
+> Codex does, so it pastes through the Codex target: `--codex`, or `--all` to keep
+> Claude Code as well. This is verified statically against its source, not yet end
+> to end. Grok Build gives up on a clipboard read after about 2 seconds, so a large
+> image over a slow link may not arrive in time.
 
 ### Other local platforms
 
@@ -167,14 +173,14 @@ and what you should see when it works. Replace `myserver` with your host.
 
 ### Paste an image into Codex CLI
 
-- **What:** the same `Ctrl+V`, for Codex.
-- **Why:** Codex reads the X11 clipboard directly instead of calling `xclip`,
-  so the shim above cannot reach it. cc-clip runs a private virtual display
+- **What:** the same `Ctrl+V`, for Codex and Grok Build.
+- **Why:** Codex and Grok Build read the X11 clipboard directly instead of calling
+  `xclip`, so the shim above cannot reach them. cc-clip runs a private virtual display
   (Xvfb) on the remote and serves your image from it.
 - **How:** `cc-clip setup myserver --codex` (or `--all` to keep Claude Code as
   well), then open a new SSH session so the shell picks up the display setting.
-- **You'll see:** Codex attaches the image. If it does not, see the Codex entry
-  in [Troubleshooting](#troubleshooting).
+- **You'll see:** the agent attaches the image. If it does not, see the Codex
+  entry in [Troubleshooting](#troubleshooting).
 
 ### Copy text from the remote to your local clipboard
 
