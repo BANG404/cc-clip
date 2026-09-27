@@ -107,6 +107,31 @@ func TestSupervisorHealthyPathAndCleanStop(t *testing.T) {
 	}
 }
 
+func TestSupervisorHealthyChildExitWakesBeforeProbeInterval(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "die")
+	t.Setenv("FAKE_SSH_UPTIME", "0.25")
+	t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:ok\n")
+
+	sup, store := newTestSupervisor(t, 18399)
+	sup.ProbeInterval = 10 * time.Second
+	sup.StartBackoffBase = 500 * time.Millisecond
+	sup.StartBackoffMax = 500 * time.Millisecond
+	sup.StartingGate = 50 * time.Millisecond
+	sup.StableWindow = 5 * time.Second
+
+	cancel, done := runSupervisor(t, sup)
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	waitUntil(t, 5*time.Second, func() bool { return sup.State() == StateHealthy }, "healthy before child exit")
+	waitUntil(t, 2*time.Second, func() bool {
+		rec, err := store.Load()
+		return err == nil && rec.Runtime.State == StateReconnecting
+	}, "persisted reconnecting state immediately after child exit")
+}
+
 // TestSupervisorRemoteNotOKNeverHealthy covers the core fail-closed rule:
 // only a remote probe of `ok` may produce StateHealthy. Every other probe
 // outcome — including unparseable output — must surface as its own non-healthy

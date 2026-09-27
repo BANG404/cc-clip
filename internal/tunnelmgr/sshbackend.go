@@ -155,6 +155,16 @@ func (b *Backend) ControlPath() string {
 	return b.controlPath
 }
 
+// Done returns a channel that closes when the currently owned SSH child exits.
+// A supervisor can wait on it alongside its probe timer so a dead child
+// invalidates a previously healthy state immediately instead of remaining
+// hidden until the next periodic probe.
+func (b *Backend) Done() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.done
+}
+
 // WaitReady waits until `ssh -O check` proves that the spawned master owns its
 // private socket. A running PID alone is not treated as readiness.
 func (b *Backend) WaitReady(ctx context.Context, timeout time.Duration) error {

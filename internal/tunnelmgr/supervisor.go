@@ -313,7 +313,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			}
 		}
 
-		if !sleepInterruptible(ctx, s.nextProbeInterval()) {
+		if !sleepUntilProbeOrChildExit(ctx, s.nextProbeInterval(), s.Backend.Done()) {
 			break
 		}
 	}
@@ -547,6 +547,22 @@ func sleepInterruptible(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():
 		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func sleepUntilProbeOrChildExit(ctx context.Context, d time.Duration, childDone <-chan struct{}) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-childDone:
+		return true
 	case <-t.C:
 		return true
 	}
