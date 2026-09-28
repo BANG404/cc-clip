@@ -39,6 +39,8 @@ type Backend struct {
 	cmd           *exec.Cmd
 	controlPath   string
 	controlConfig string
+	controlDir    string
+	ephemeralDir  bool
 	running       bool
 	forwarded     bool
 	exit          *ExitInfo
@@ -53,22 +55,20 @@ func (b *Backend) Start() error {
 		b.mu.Unlock()
 		return fmt.Errorf("managed ssh child already running")
 	}
-	dir, err := b.controlDir()
+	dir, ephemeralDir, err := b.prepareControlDir()
 	if err != nil {
-		b.mu.Unlock()
-		return err
-	}
-	if err := ensurePrivateDir(dir); err != nil {
 		b.mu.Unlock()
 		return err
 	}
 	controlPath, err := newControlSocketPath(dir)
 	if err != nil {
+		cleanupControlArtifacts("", "", dir, ephemeralDir)
 		b.mu.Unlock()
 		return err
 	}
 	controlConfig, err := newEmptyControlConfig(controlPath + ".config")
 	if err != nil {
+		cleanupControlArtifacts(controlPath, "", dir, ephemeralDir)
 		b.mu.Unlock()
 		return err
 	}
@@ -78,13 +78,15 @@ func (b *Backend) Start() error {
 	cmd.Stderr = buf
 	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
-		_ = os.Remove(controlConfig)
+		cleanupControlArtifacts(controlPath, controlConfig, dir, ephemeralDir)
 		b.mu.Unlock()
 		return fmt.Errorf("start ssh master: %w", err)
 	}
 	b.cmd = cmd
 	b.controlPath = controlPath
 	b.controlConfig = controlConfig
+	b.controlDir = dir
+	b.ephemeralDir = ephemeralDir
 	b.running = true
 	b.forwarded = false
 	b.exit = nil
@@ -92,11 +94,11 @@ func (b *Backend) Start() error {
 	b.done = done
 	b.mu.Unlock()
 
-	go b.reap(cmd, startedAt, controlPath, controlConfig, buf, done)
+	go b.reap(cmd, startedAt, controlPath, controlConfig, dir, ephemeralDir, buf, done)
 	return nil
 }
 
-func (b *Backend) reap(cmd *exec.Cmd, startedAt time.Time, controlPath, controlConfig string, buf *tailBuffer, done chan struct{}) {
+func (b *Backend) reap(cmd *exec.Cmd, startedAt time.Time, controlPath, controlConfig, controlDir string, ephemeralDir bool, buf *tailBuffer, done chan struct{}) {
 	err := cmd.Wait()
 	code := -1
 	if err == nil {
@@ -111,8 +113,7 @@ func (b *Backend) reap(cmd *exec.Cmd, startedAt time.Time, controlPath, controlC
 		b.exit = &ExitInfo{Code: code, StderrTail: strings.TrimSpace(buf.Tail()), Uptime: time.Since(startedAt)}
 	}
 	b.mu.Unlock()
-	_ = os.Remove(controlPath)
-	_ = os.Remove(controlConfig)
+	cleanupControlArtifacts(controlPath, controlConfig, controlDir, ephemeralDir)
 	close(done)
 }
 
@@ -242,6 +243,8 @@ func (b *Backend) Stop(grace time.Duration) {
 	running := b.running
 	controlPath := b.controlPath
 	controlConfig := b.controlConfig
+	controlDir := b.controlDir
+	ephemeralDir := b.ephemeralDir
 	b.mu.Unlock()
 
 	if cmd != nil && running {
@@ -289,10 +292,11 @@ func (b *Backend) Stop(grace time.Duration) {
 		b.done = nil
 		b.running = false
 		b.forwarded = false
+		b.controlDir = ""
+		b.ephemeralDir = false
 	}
 	b.mu.Unlock()
-	_ = os.Remove(controlPath)
-	_ = os.Remove(controlConfig)
+	cleanupControlArtifacts(controlPath, controlConfig, controlDir, ephemeralDir)
 }
 
 func (b *Backend) ProbeRemote(ctx context.Context, timeout time.Duration) (tunnel.RemoteTunnelState, error) {
@@ -387,25 +391,46 @@ func (b *Backend) sshBinary() string {
 	return "ssh"
 }
 
-func (b *Backend) controlDir() (string, error) {
+func (b *Backend) prepareControlDir() (string, bool, error) {
 	if b.ControlDir != "" {
-		return b.ControlDir, nil
+		if err := ensurePrivateDir(b.ControlDir); err != nil {
+			return "", false, err
+		}
+		return b.ControlDir, false, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve control socket directory: %w", err)
-	}
-	return filepath.Join(home, defaultControlDirName), nil
+	return newDefaultControlDir()
 }
 
 func ensurePrivateDir(dir string) error {
 	if err := os.MkdirAll(dir, stateDirMode); err != nil {
 		return fmt.Errorf("create control socket dir: %w", err)
 	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect control socket dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("control socket path %s is not a directory", dir)
+	}
+	if !controlDirOwnedByCurrentUser(info) {
+		return fmt.Errorf("control socket dir %s is owned by another user", dir)
+	}
 	if err := os.Chmod(dir, stateDirMode); err != nil {
 		return fmt.Errorf("secure control socket dir: %w", err)
 	}
 	return nil
+}
+
+func cleanupControlArtifacts(controlPath, controlConfig, controlDir string, ephemeralDir bool) {
+	if controlPath != "" {
+		_ = os.Remove(controlPath)
+	}
+	if controlConfig != "" {
+		_ = os.Remove(controlConfig)
+	}
+	if ephemeralDir && controlDir != "" {
+		_ = os.Remove(controlDir)
+	}
 }
 
 func newControlSocketPath(dir string) (string, error) {

@@ -59,6 +59,67 @@ func TestBackendStopSignalsOnlyOwnedChild(t *testing.T) {
 	}
 }
 
+func TestBackendDefaultControlDirSurvivesLongHomeAndCleansUp(t *testing.T) {
+	fake := writeFakeSSH(t)
+	t.Setenv("FAKE_SSH_MODE", "master")
+	t.Setenv("HOME", filepath.Join(t.TempDir(), strings.Repeat("very-long-home-segment-", 8)))
+
+	b := &Backend{
+		Spec:      Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"},
+		SSHBinary: fake,
+	}
+	if err := b.Start(); err != nil {
+		t.Fatalf("start with long HOME: %v", err)
+	}
+	defer b.Stop(2 * time.Second)
+	controlPath := b.ControlPath()
+	controlDir := filepath.Dir(controlPath)
+	if len(controlPath) > maxDefaultControlSocketPathLen {
+		t.Fatalf("control path length = %d, want <= %d: %q", len(controlPath), maxDefaultControlSocketPathLen, controlPath)
+	}
+	info, err := os.Lstat(controlDir)
+	if err != nil {
+		t.Fatalf("stat private control dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != stateDirMode {
+		t.Fatalf("control dir mode = %o, want %o", got, stateDirMode)
+	}
+
+	b.Stop(2 * time.Second)
+	if _, err := os.Lstat(controlDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ephemeral control dir must be removed after stop, stat err = %v", err)
+	}
+}
+
+func TestDefaultControlDirFallsBackFromUnavailableRuntimeRoots(t *testing.T) {
+	missingRoot := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("XDG_RUNTIME_DIR", missingRoot)
+	t.Setenv("TMPDIR", missingRoot)
+
+	dir, ephemeral, err := newDefaultControlDir()
+	if err != nil {
+		t.Fatalf("fallback control dir: %v", err)
+	}
+	if !ephemeral {
+		t.Fatal("fallback control dir must be ephemeral")
+	}
+	t.Cleanup(func() { cleanupControlArtifacts("", "", dir, true) })
+	if !defaultControlPathFits(dir) {
+		t.Fatalf("fallback control dir is too long: %q", dir)
+	}
+}
+
+func TestEnsurePrivateDirRejectsSymlink(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "control")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := ensurePrivateDir(link); err == nil {
+		t.Fatal("symlink control dir must be rejected")
+	}
+}
+
 func TestMasterArgsHaveNoForwardAfterOpenSSHParsing(t *testing.T) {
 	ssh, err := exec.LookPath("ssh")
 	if err != nil {
