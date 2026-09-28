@@ -139,13 +139,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		if !s.Backend.Running() {
 			if exit := s.Backend.ConsumeLastExit(); exit != nil {
 				cause := classifyExit(exit)
-				if err := s.recordStartFailure(cause, exit); err != nil {
+				retry, err := s.recordStartFailureAndWait(ctx, cause, exit)
+				if err != nil {
 					return s.shutdown(err, false)
 				}
-				if s.State() == StateCrashLoop {
-					return ErrCrashLoopOpen
-				}
-				if !sleepInterruptible(ctx, s.retryDelay(cause)) {
+				if !retry {
 					break
 				}
 			}
@@ -168,13 +166,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				return err
 			}
 			if err := s.Backend.Start(); err != nil {
-				if err := s.recordStartFailure(StateReconnecting, &ExitInfo{Code: -1, StderrTail: err.Error()}); err != nil {
-					return err
+				retry, retryErr := s.recordStartFailureAndWait(ctx, StateReconnecting, &ExitInfo{Code: -1, StderrTail: err.Error()})
+				if retryErr != nil {
+					return retryErr
 				}
-				if s.State() == StateCrashLoop {
-					return ErrCrashLoopOpen
-				}
-				if !sleepInterruptible(ctx, s.backoff()) {
+				if !retry {
 					break
 				}
 				continue
@@ -194,13 +190,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 					exit = &ExitInfo{Code: -1, StderrTail: err.Error()}
 				}
 				cause := classifyExit(exit)
-				if err := s.recordStartFailure(cause, exit); err != nil {
+				retry, err := s.recordStartFailureAndWait(ctx, cause, exit)
+				if err != nil {
 					return err
 				}
-				if s.State() == StateCrashLoop {
-					return ErrCrashLoopOpen
-				}
-				if !sleepInterruptible(ctx, s.retryDelay(cause)) {
+				if !retry {
 					break
 				}
 				continue
@@ -232,10 +226,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				}
 				s.Backend.Stop(s.StopGrace)
 				_ = s.Backend.ConsumeLastExit()
-				if err := s.recordStartFailure(StateReconnecting, &ExitInfo{Code: -1, StderrTail: err.Error()}); err != nil {
-					return err
+				retry, retryErr := s.recordStartFailureAndWait(ctx, StateReconnecting, &ExitInfo{Code: -1, StderrTail: err.Error()})
+				if retryErr != nil {
+					return retryErr
 				}
-				if !sleepInterruptible(ctx, s.backoff()) {
+				if !retry {
 					break
 				}
 				continue
@@ -406,6 +401,16 @@ func (s *Supervisor) recordStartFailure(cause State, exit *ExitInfo) error {
 	}
 	s.logTransition(oldState)
 	return nil
+}
+
+func (s *Supervisor) recordStartFailureAndWait(ctx context.Context, cause State, exit *ExitInfo) (bool, error) {
+	if err := s.recordStartFailure(cause, exit); err != nil {
+		return false, err
+	}
+	if s.State() == StateCrashLoop {
+		return false, ErrCrashLoopOpen
+	}
+	return sleepInterruptible(ctx, s.retryDelay(cause)), nil
 }
 
 func (s *Supervisor) retryDelay(cause State) time.Duration {

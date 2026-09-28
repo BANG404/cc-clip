@@ -331,6 +331,50 @@ func TestSupervisorPortConflictWithFailedCheckRestartsMaster(t *testing.T) {
 	<-done
 }
 
+func TestSupervisorForwardFailuresOpenCrashLoop(t *testing.T) {
+	t.Setenv("FAKE_SSH_MODE", "master")
+	t.Setenv("FAKE_SSH_FORWARD_MODE", "fail")
+	countFile := filepath.Join(t.TempDir(), "count")
+	t.Setenv("FAKE_SSH_COUNT_FILE", countFile)
+
+	sup, store := newTestSupervisor(t, 18399)
+	sup.StartingGate = 5 * time.Second
+	sup.StartBackoffBase = 5 * time.Millisecond
+	sup.StartBackoffMax = 15 * time.Millisecond
+	sup.CrashLoopThreshold = 3
+
+	cancel, done := runSupervisor(t, sup)
+	defer cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCrashLoopOpen) {
+			t.Fatalf("Run error = %v, want crash-loop", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop after repeated forward failures")
+	}
+
+	startsAtOpen := fakeMasterStarts(countFile)
+	if startsAtOpen != sup.CrashLoopThreshold {
+		t.Fatalf("master starts before circuit opened = %d, want %d", startsAtOpen, sup.CrashLoopThreshold)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := fakeMasterStarts(countFile); got != startsAtOpen {
+		t.Fatalf("supervisor restarted after forward crash-loop: starts changed from %d to %d", startsAtOpen, got)
+	}
+
+	final, err := store.Load()
+	if err != nil {
+		t.Fatalf("load final state: %v", err)
+	}
+	if final.Runtime.ConsecutiveStartFailures != sup.CrashLoopThreshold {
+		t.Fatalf("persisted failures = %d, want %d", final.Runtime.ConsecutiveStartFailures, sup.CrashLoopThreshold)
+	}
+	if final.Runtime.State != StateCrashLoop {
+		t.Fatalf("persisted state = %q, want crash-loop", final.Runtime.State)
+	}
+}
+
 func TestSupervisorAuthRequiredUsesAttentionWait(t *testing.T) {
 	t.Setenv("FAKE_SSH_MODE", "authfail")
 	countFile := filepath.Join(t.TempDir(), "count")
