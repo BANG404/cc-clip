@@ -44,6 +44,7 @@ if [ "$has_n" = "1" ]; then
 fi
 case "$op" in
   check)
+	[ "$FAKE_SSH_CHECK_MODE" = "hang" ] && exec sleep 30
 	[ "$FAKE_SSH_CHECK_MODE" = "after-conflict" ] && [ -e "$cp.conflict" ] && exit 255
     [ -r "$cp" ] || exit 255
     kill -0 "$(cat "$cp")" 2>/dev/null || exit 255

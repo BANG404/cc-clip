@@ -122,6 +122,40 @@ func TestBackendProbeRemoteClassifiesMarker(t *testing.T) {
 	}
 }
 
+func TestBackendProbeRemoteBoundsMasterCheck(t *testing.T) {
+	fake := writeFakeSSH(t)
+	t.Setenv("FAKE_SSH_MODE", "master")
+
+	b := &Backend{
+		Spec:       Spec{Host: "fake-host", Port: 18399, ExpectedInstanceID: "instance-123"},
+		SSHBinary:  fake,
+		ControlDir: t.TempDir(),
+	}
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := b.WaitReady(context.Background(), 5*time.Second); err != nil {
+		t.Fatalf("wait ready: %v", err)
+	}
+	defer b.Stop(2 * time.Second)
+
+	t.Setenv("FAKE_SSH_CHECK_MODE", "hang")
+	parentCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	state, err := b.ProbeRemote(parentCtx, 100*time.Millisecond)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("probe must fail when the master check times out")
+	}
+	if state.Healthy() {
+		t.Fatalf("probe state = %q, must fail closed", state)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("master check ignored probe timeout: elapsed %s", elapsed)
+	}
+}
+
 // TestBackendProbeRemoteFailsClosed verifies that a probe which does not
 // complete (transport error, unrecognized output) is never read as healthy.
 func TestBackendProbeRemoteFailsClosed(t *testing.T) {

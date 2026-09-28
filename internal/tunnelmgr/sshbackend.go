@@ -314,14 +314,14 @@ func (b *Backend) ProbeIdentity(ctx context.Context, timeout time.Duration) (tun
 }
 
 func (b *Backend) runRemote(ctx context.Context, timeout time.Duration, remoteCmd string) (string, error) {
-	if err := b.Check(ctx); err != nil {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := b.Check(probeCtx); err != nil {
 		return "", fmt.Errorf("check ssh master: %w", err)
 	}
 	b.mu.Lock()
 	controlPath, controlConfig := b.controlPath, b.controlConfig
 	b.mu.Unlock()
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	cmd := exec.CommandContext(probeCtx, b.sshBinary(), b.probeArgs(controlConfig, controlPath, remoteCmd)...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
