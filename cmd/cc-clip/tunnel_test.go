@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,5 +105,22 @@ func TestParseTunnelRunArgsAllowsEqualsPort(t *testing.T) {
 	}
 	if port := getPort(); port != 18340 {
 		t.Fatalf("getPort() = %d, want 18340", port)
+	}
+}
+
+func TestTunnelUsageDocumentsCurrentLimitations(t *testing.T) {
+	var out bytes.Buffer
+	tunnelUsage(&out)
+	usage := strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{
+		`cc-clip connect <host> --force`,
+		`$HOME/.local/bin/cc-clip`,
+		`--use-remote-bin`,
+		`30-day sliding expiration`,
+		`token active while the supervisor runs`,
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("tunnelUsage() missing %q", want)
+		}
 	}
 }

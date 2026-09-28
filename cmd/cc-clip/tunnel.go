@@ -19,7 +19,7 @@ import (
 
 // cmdTunnel implements `cc-clip tunnel <subcommand>`.
 //
-// Phase 1A of the managed persistent tunnel (issue #108) ships exactly one
+// The experimental managed persistent tunnel (issue #108) ships exactly one
 // user-facing subcommand: `run`, a foreground, manually started supervisor
 // for a single host. It exists so the lifecycle logic can be exercised on real hosts
 // before any service-manager work is layered on. It does not install a
@@ -86,6 +86,15 @@ Host normally so HostName, User, IdentityFile and ProxyJump keep working.
 It does NOT enable anything automatically. Your existing interactive
 RemoteForward setup keeps working exactly as before; stop this command
 before relying on the managed forward (both bind the same remote port).
+
+Before first use with an existing host, deploy the identity helper:
+  cc-clip connect <host> --force
+
+This experimental command invokes the identity helper only at
+$HOME/.local/bin/cc-clip, so hosts deployed with --use-remote-bin are not
+currently supported. Authenticated identity probes count as token use for the
+30-day sliding expiration and can keep the token active while the supervisor
+runs.
 
 State is persisted per host under ~/.cache/cc-clip/tunnels/ (mode 0600).
 Use --reset to explicitly rebuild corrupt runtime or clear crash-loop state.`)

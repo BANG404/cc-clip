@@ -144,6 +144,13 @@ Managed tunnel (experimental, manual only):
                      No LaunchAgent, no ~/.ssh/config changes, nothing enabled
                      automatically. The legacy RemoteForward workflow is
                      unchanged and remains the default.
+                     Existing hosts must first run:
+                       cc-clip connect <host> --force
+                     The experimental managed tunnel requires the identity
+                     helper at $HOME/.local/bin/cc-clip; --use-remote-bin hosts
+                     are not currently supported. Identity probes count as
+                     token use for the 30-day sliding expiration and can keep
+                     the token active while the supervisor runs.
     --port           Tunnel port (default: 18339, env: CC_CLIP_PORT)
     --reset          Reset persisted runtime and clear crash-loop state
 
