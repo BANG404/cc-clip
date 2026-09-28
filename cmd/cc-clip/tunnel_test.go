@@ -86,3 +86,23 @@ func TestCmdTunnelProbeIdentityReportsEndpointUnavailable(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTunnelRunArgsAllowsEqualsPort(t *testing.T) {
+	originalArgs := os.Args
+	os.Args = []string{"cc-clip", "tunnel", "run", "example-host", "--port=18340"}
+	t.Cleanup(func() { os.Args = originalArgs })
+
+	host, reset, err := parseTunnelRunArgs(os.Args[3:])
+	if err != nil {
+		t.Fatalf("parseTunnelRunArgs() error = %v", err)
+	}
+	if host != "example-host" {
+		t.Fatalf("parseTunnelRunArgs() host = %q, want example-host", host)
+	}
+	if reset {
+		t.Fatal("parseTunnelRunArgs() reset = true, want false")
+	}
+	if port := getPort(); port != 18340 {
+		t.Fatalf("getPort() = %d, want 18340", port)
+	}
+}

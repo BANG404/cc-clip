@@ -91,24 +91,30 @@ State is persisted per host under ~/.cache/cc-clip/tunnels/ (mode 0600).
 Use --reset to explicitly rebuild corrupt runtime or clear crash-loop state.`)
 }
 
-func cmdTunnelRun(args []string) {
-	host := ""
-	reset := false
+func parseTunnelRunArgs(args []string) (host string, reset bool, err error) {
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--port":
 			i++ // value consumed by getPort()
+		case strings.HasPrefix(args[i], "--port="):
 		case args[i] == "--reset":
 			reset = true
 		case strings.HasPrefix(args[i], "-"):
-			fmt.Fprintf(os.Stderr, "cc-clip tunnel run: unknown flag %s\n", args[i])
-			os.Exit(2)
+			return "", false, fmt.Errorf("unknown flag %s", args[i])
 		case host == "":
 			host = args[i]
 		default:
-			fmt.Fprintln(os.Stderr, "cc-clip tunnel run: exactly one <host> argument is required")
-			os.Exit(2)
+			return "", false, errors.New("exactly one <host> argument is required")
 		}
+	}
+	return host, reset, nil
+}
+
+func cmdTunnelRun(args []string) {
+	host, reset, err := parseTunnelRunArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cc-clip tunnel run: %v\n", err)
+		os.Exit(2)
 	}
 	if host == "" {
 		tunnelUsage(os.Stderr)
