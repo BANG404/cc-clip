@@ -187,7 +187,8 @@ func TestSupervisorRequiresAuthenticatedExpectedIdentity(t *testing.T) {
 		out  string
 		want State
 	}{
-		{"endpoint unavailable", "cc-clip-identity:unavailable\n", StateProbeUnavailable},
+		{"helper missing", "cc-clip-identity:helper-missing\n", StateIdentityHelperMissing},
+		{"endpoint unavailable", "cc-clip-identity:endpoint-unavailable\n", StateIdentityEndpointUnavailable},
 		{"token rejected", "cc-clip-identity:token-invalid\n", StateRemoteTokenInvalid},
 		{"unknown identity", "cc-clip-identity:unknown\n", StateRemoteUnknown},
 	}
@@ -207,7 +208,7 @@ func TestSupervisorRequiresAuthenticatedExpectedIdentity(t *testing.T) {
 		})
 	}
 
-	t.Run("different instance is config error", func(t *testing.T) {
+	t.Run("different instance has dedicated state", func(t *testing.T) {
 		t.Setenv("FAKE_SSH_MODE", "master")
 		t.Setenv("FAKE_SSH_PROBE_OUT", "cc-clip-probe:ok\n")
 		t.Setenv("FAKE_SSH_IDENTITY_OUT", `cc-clip-identity:ok:{"service":"cc-clip","status":"ok","protocol_version":1,"instance_id":"other-instance"}`)
@@ -220,10 +221,32 @@ func TestSupervisorRequiresAuthenticatedExpectedIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if rec.Runtime.State != StateConfigError {
-			t.Fatalf("persisted state = %q, want config-error", rec.Runtime.State)
+		if rec.Runtime.State != StateIdentityMismatch {
+			t.Fatalf("persisted state = %q, want identity-mismatch", rec.Runtime.State)
 		}
 	})
+}
+
+func TestSupervisorLocalIdentityFailuresRemainDistinct(t *testing.T) {
+	sup, _ := newTestSupervisor(t, 18399)
+	sup.FetchLocalIdentity = func(string, string, time.Duration) (tunnel.IdentityInfo, error) {
+		return tunnel.IdentityInfo{Service: "cc-clip", Status: "ok", ProtocolVersion: 1, InstanceID: "other-instance"}, nil
+	}
+	if ready, state, _ := sup.localReady(); ready || state != StateIdentityMismatch {
+		t.Fatalf("local identity mismatch = ready %v, state %q; want identity-mismatch", ready, state)
+	}
+
+	sup.FetchLocalIdentity = func(string, string, time.Duration) (tunnel.IdentityInfo, error) {
+		return tunnel.IdentityInfo{}, tunnel.ErrIdentityEndpointUnavailable
+	}
+	if ready, state, _ := sup.localReady(); ready || state != StateIdentityEndpointUnavailable {
+		t.Fatalf("local endpoint unavailable = ready %v, state %q; want identity-endpoint-unavailable", ready, state)
+	}
+
+	sup.ReadLocalToken = func() (string, error) { return "", errors.New("token file missing") }
+	if ready, state, _ := sup.localReady(); ready || state != StateConfigError {
+		t.Fatalf("local token read failure = ready %v, state %q; want config-error", ready, state)
+	}
 }
 
 func TestSupervisorTokenInvalidKeepsMasterAndRecoversInPlace(t *testing.T) {

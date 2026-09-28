@@ -50,15 +50,17 @@ const (
 	// checking; a human must fix known_hosts.
 	StateHostKeyError State = "host-key-error"
 
-	StateLocalDaemonDown    State = "local-daemon-down"
-	StateRemoteDown         State = "remote-down"
-	StateRemoteStale        State = "remote-stale"
-	StateRemoteUnverified   State = "remote-unverified"
-	StateRemoteUnknown      State = "remote-unknown"
-	StateProbeUnavailable   State = "probe-unavailable"
-	StateRemoteTokenInvalid State = "remote-token-invalid"
-	StatePortConflict       State = "port-conflict"
-	StateConfigError        State = "config-error"
+	StateLocalDaemonDown             State = "local-daemon-down"
+	StateRemoteDown                  State = "remote-down"
+	StateRemoteStale                 State = "remote-stale"
+	StateRemoteUnverified            State = "remote-unverified"
+	StateRemoteUnknown               State = "remote-unknown"
+	StateIdentityHelperMissing       State = "identity-helper-missing"
+	StateIdentityEndpointUnavailable State = "identity-endpoint-unavailable"
+	StateIdentityMismatch            State = "identity-mismatch"
+	StateRemoteTokenInvalid          State = "remote-token-invalid"
+	StatePortConflict                State = "port-conflict"
+	StateConfigError                 State = "config-error"
 
 	// StateCrashLoop means the supervisor hit CrashLoopThreshold consecutive
 	// failed starts without reaching the stable window. Automatic restarts
@@ -85,7 +87,8 @@ func ParseState(s string) (State, error) {
 	case StateUnknown, StateStarting, StateHealthy, StateReconnecting,
 		StateLocalDaemonDown, StateAuthRequired, StateHostKeyError,
 		StateRemoteDown, StateRemoteStale, StateRemoteUnverified,
-		StateRemoteUnknown, StateProbeUnavailable, StateRemoteTokenInvalid,
+		StateRemoteUnknown, StateIdentityHelperMissing, StateIdentityEndpointUnavailable,
+		StateIdentityMismatch, StateRemoteTokenInvalid,
 		StatePortConflict, StateConfigError, StateCrashLoop, StateStopped:
 		return State(s), nil
 	default:

@@ -137,7 +137,8 @@ func TestStateHealthyFailsClosed(t *testing.T) {
 		StateUnknown, StateStarting, StateHealthy, StateReconnecting,
 		StateLocalDaemonDown, StateAuthRequired, StateHostKeyError,
 		StateRemoteDown, StateRemoteStale, StateRemoteUnverified,
-		StateRemoteUnknown, StateProbeUnavailable, StateRemoteTokenInvalid,
+		StateRemoteUnknown, StateIdentityHelperMissing, StateIdentityEndpointUnavailable,
+		StateIdentityMismatch, StateRemoteTokenInvalid,
 		StatePortConflict, StateConfigError, StateCrashLoop, StateStopped,
 	}
 	for _, s := range states {

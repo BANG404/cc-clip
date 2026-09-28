@@ -61,8 +61,8 @@ func cmdTunnelProbeIdentity(w io.Writer) {
 			state = tunnel.RemoteIdentityOK
 		case errors.Is(err, tunnel.ErrIdentityUnauthorized):
 			state = tunnel.RemoteIdentityTokenInvalid
-		case errors.Is(err, tunnel.ErrIdentityUnavailable):
-			state = tunnel.RemoteIdentityUnavailable
+		case errors.Is(err, tunnel.ErrIdentityEndpointUnavailable):
+			state = tunnel.RemoteIdentityEndpointUnavailable
 		}
 	}
 	fmt.Fprintln(w, tunnel.RemoteIdentityProbeOutput(state, identity))

@@ -153,7 +153,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				if err := s.transition(state, "", reason); err != nil {
 					return s.shutdown(err, false)
 				}
-				if state == StateConfigError {
+				if state == StateConfigError || state == StateIdentityMismatch {
 					return fmt.Errorf("local tunnel configuration: %s", reason)
 				}
 				if !sleepInterruptible(ctx, s.LocalRetryInterval) {
@@ -242,7 +242,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			if err := s.transition(state, "", reason); err != nil {
 				return s.shutdown(err, false)
 			}
-			if state == StateConfigError {
+			if state == StateConfigError || state == StateIdentityMismatch {
 				return s.shutdown(fmt.Errorf("local tunnel configuration: %s", reason), false)
 			}
 			if !sleepInterruptible(ctx, s.LocalRetryInterval) {
@@ -289,8 +289,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			switch {
 			case identityErr != nil:
 				err = s.transition(StateRemoteUnknown, remote, identityErr.Error())
-			case identityState == tunnel.RemoteIdentityUnavailable:
-				err = s.transition(StateProbeUnavailable, remote, "remote tunnel identity helper or endpoint unavailable")
+			case identityState == tunnel.RemoteIdentityHelperMissing:
+				err = s.transition(StateIdentityHelperMissing, remote, "remote tunnel identity helper is missing or does not support tunnel probe-identity")
+			case identityState == tunnel.RemoteIdentityEndpointUnavailable:
+				err = s.transition(StateIdentityEndpointUnavailable, remote, "remote daemon tunnel identity endpoint unavailable")
 			case identityState == tunnel.RemoteIdentityTokenInvalid:
 				err = s.transition(StateRemoteTokenInvalid, remote, fmt.Sprintf(
 					"remote token rejected by local daemon; run cc-clip connect %q --token-only from the local machine",
@@ -299,7 +301,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			case identityState != tunnel.RemoteIdentityOK:
 				err = s.transition(StateRemoteUnknown, remote, "remote tunnel identity probe did not complete")
 			case identity.InstanceID != s.Spec.ExpectedInstanceID:
-				err = s.transition(StateConfigError, remote, "remote tunnel reached a different cc-clip instance")
+				err = s.transition(StateIdentityMismatch, remote, "remote tunnel reached a different cc-clip instance")
 				if err == nil {
 					return s.shutdown(fmt.Errorf("remote tunnel identity mismatch"), false)
 				}
@@ -351,13 +353,13 @@ func (s *Supervisor) localReady() (bool, State, string) {
 	}
 	identity, err := s.FetchLocalIdentity(addr, tok, 2*time.Second)
 	if err != nil {
-		if errors.Is(err, tunnel.ErrIdentityUnavailable) {
-			return false, StateProbeUnavailable, err.Error()
+		if errors.Is(err, tunnel.ErrIdentityEndpointUnavailable) {
+			return false, StateIdentityEndpointUnavailable, err.Error()
 		}
 		return false, StateConfigError, err.Error()
 	}
 	if identity.InstanceID != s.Spec.ExpectedInstanceID {
-		return false, StateConfigError, "local daemon instance does not match persisted tunnel spec"
+		return false, StateIdentityMismatch, "local daemon instance does not match persisted tunnel spec"
 	}
 	return true, StateHealthy, ""
 }

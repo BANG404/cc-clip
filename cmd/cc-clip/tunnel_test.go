@@ -49,3 +49,40 @@ func TestCmdTunnelProbeIdentity(t *testing.T) {
 		t.Fatalf("helper result = %q %+v; output=%s", state, identity, out.String())
 	}
 }
+
+func TestCmdTunnelProbeIdentityReportsEndpointUnavailable(t *testing.T) {
+	for name, status := range map[string]int{
+		"missing endpoint":     http.StatusNotFound,
+		"identity unavailable": http.StatusServiceUnavailable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			token.TokenDirOverride = t.TempDir()
+			t.Cleanup(func() { token.TokenDirOverride = "" })
+			if _, err := token.WriteTokenFile("token-123", time.Now().Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, http.StatusText(status), status)
+			}))
+			t.Cleanup(ts.Close)
+			_, portText, err := net.SplitHostPort(ts.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			originalArgs := os.Args
+			os.Args = []string{"cc-clip", "tunnel", "probe-identity", "--port", strconv.Itoa(port)}
+			t.Cleanup(func() { os.Args = originalArgs })
+			var out bytes.Buffer
+			cmdTunnelProbeIdentity(&out)
+			if state, _ := tunnel.ClassifyRemoteIdentityProbeOutput(out.String()); state != tunnel.RemoteIdentityEndpointUnavailable {
+				t.Fatalf("helper state = %q, want endpoint-unavailable; output=%s", state, out.String())
+			}
+		})
+	}
+}

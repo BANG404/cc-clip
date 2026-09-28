@@ -45,15 +45,35 @@ func TestRemoteIdentityProbeUsesDeployedHelper(t *testing.T) {
 	}
 }
 
-func TestRemoteIdentityProbeMissingHelperIsUnavailable(t *testing.T) {
+func TestRemoteIdentityProbeMissingHelperIsDistinct(t *testing.T) {
 	requireProbeShellTools(t)
 	t.Setenv("HOME", t.TempDir())
 	out, err := exec.Command("sh", "-c", RemoteIdentityProbeCommand(18339)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("identity command: %v: %s", err, out)
 	}
-	if state, _ := ClassifyRemoteIdentityProbeOutput(string(out)); state != RemoteIdentityUnavailable {
+	if state, _ := ClassifyRemoteIdentityProbeOutput(string(out)); state != RemoteIdentityHelperMissing {
 		t.Fatalf("missing helper state = %q, output=%s", state, out)
+	}
+}
+
+func TestRemoteIdentityProbeUnsupportedHelperIsMissingCapability(t *testing.T) {
+	requireProbeShellTools(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	helperDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(helperDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(helperDir, "cc-clip"), []byte("#!/bin/sh\nexit 2\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-c", RemoteIdentityProbeCommand(18339)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("identity command: %v: %s", err, out)
+	}
+	if state, _ := ClassifyRemoteIdentityProbeOutput(string(out)); state != RemoteIdentityHelperMissing {
+		t.Fatalf("unsupported helper state = %q, output=%s", state, out)
 	}
 }
 
@@ -66,6 +86,15 @@ func TestRemoteIdentityProbeOutput(t *testing.T) {
 	if got := RemoteIdentityProbeOutput(RemoteIdentityOK, IdentityInfo{}); got != identityMarkerUnknown {
 		t.Fatalf("invalid successful identity = %q, want unknown marker", got)
 	}
+	for state, marker := range map[RemoteIdentityState]string{
+		RemoteIdentityHelperMissing:       identityMarkerHelperMissing,
+		RemoteIdentityEndpointUnavailable: identityMarkerEndpointUnavailable,
+		RemoteIdentityTokenInvalid:        identityMarkerTokenInvalid,
+	} {
+		if got := RemoteIdentityProbeOutput(state, IdentityInfo{}); got != marker {
+			t.Fatalf("output for %q = %q, want %q", state, got, marker)
+		}
+	}
 }
 
 func TestClassifyRemoteIdentityProbeOutput(t *testing.T) {
@@ -75,10 +104,11 @@ func TestClassifyRemoteIdentityProbeOutput(t *testing.T) {
 		t.Fatalf("valid identity = %q %+v", state, identity)
 	}
 	for marker, want := range map[string]RemoteIdentityState{
-		identityMarkerUnavailable:  RemoteIdentityUnavailable,
-		identityMarkerTokenInvalid: RemoteIdentityTokenInvalid,
-		identityMarkerUnknown:      RemoteIdentityUnknown,
-		"motd only":                RemoteIdentityUnknown,
+		identityMarkerHelperMissing:       RemoteIdentityHelperMissing,
+		identityMarkerEndpointUnavailable: RemoteIdentityEndpointUnavailable,
+		identityMarkerTokenInvalid:        RemoteIdentityTokenInvalid,
+		identityMarkerUnknown:             RemoteIdentityUnknown,
+		"motd only":                       RemoteIdentityUnknown,
 	} {
 		if got, _ := ClassifyRemoteIdentityProbeOutput(marker); got != want {
 			t.Fatalf("classify %q = %q, want %q", marker, got, want)

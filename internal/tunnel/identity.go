@@ -13,8 +13,8 @@ import (
 const IdentityProtocolVersion = 1
 
 var (
-	ErrIdentityUnavailable  = errors.New("tunnel identity endpoint unavailable")
-	ErrIdentityUnauthorized = errors.New("tunnel identity token rejected")
+	ErrIdentityEndpointUnavailable = errors.New("tunnel identity endpoint unavailable")
+	ErrIdentityUnauthorized        = errors.New("tunnel identity token rejected")
 )
 
 // IdentityInfo is returned by the token-protected /tunnel/identity endpoint.
@@ -44,7 +44,7 @@ func FetchIdentity(addr, bearerToken string, timeout time.Duration) (IdentityInf
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return IdentityInfo{}, ErrIdentityUnauthorized
 	case http.StatusNotFound, http.StatusServiceUnavailable:
-		return IdentityInfo{}, ErrIdentityUnavailable
+		return IdentityInfo{}, ErrIdentityEndpointUnavailable
 	case http.StatusOK:
 	default:
 		return IdentityInfo{}, fmt.Errorf("GET /tunnel/identity -> %d", resp.StatusCode)
@@ -76,17 +76,19 @@ func (i IdentityInfo) Validate() error {
 type RemoteIdentityState string
 
 const (
-	RemoteIdentityOK           RemoteIdentityState = "ok"
-	RemoteIdentityUnavailable  RemoteIdentityState = "unavailable"
-	RemoteIdentityTokenInvalid RemoteIdentityState = "token-invalid"
-	RemoteIdentityUnknown      RemoteIdentityState = "unknown"
+	RemoteIdentityOK                  RemoteIdentityState = "ok"
+	RemoteIdentityHelperMissing       RemoteIdentityState = "helper-missing"
+	RemoteIdentityEndpointUnavailable RemoteIdentityState = "endpoint-unavailable"
+	RemoteIdentityTokenInvalid        RemoteIdentityState = "token-invalid"
+	RemoteIdentityUnknown             RemoteIdentityState = "unknown"
 )
 
 const (
-	identityMarkerOK           = "cc-clip-identity:ok:"
-	identityMarkerUnavailable  = "cc-clip-identity:unavailable"
-	identityMarkerTokenInvalid = "cc-clip-identity:token-invalid"
-	identityMarkerUnknown      = "cc-clip-identity:unknown"
+	identityMarkerOK                  = "cc-clip-identity:ok:"
+	identityMarkerHelperMissing       = "cc-clip-identity:helper-missing"
+	identityMarkerEndpointUnavailable = "cc-clip-identity:endpoint-unavailable"
+	identityMarkerTokenInvalid        = "cc-clip-identity:token-invalid"
+	identityMarkerUnknown             = "cc-clip-identity:unknown"
 )
 
 // RemoteIdentityProbeCommand builds a fixed remote shell command that invokes
@@ -98,7 +100,7 @@ if [ ! -x "$_cc_helper" ]; then
   echo '%[2]s'
 elif ! "$_cc_helper" tunnel probe-identity --port %[1]d 2>/dev/null; then
   echo '%[2]s'
-fi`, port, identityMarkerUnavailable)
+fi`, port, identityMarkerHelperMissing)
 }
 
 // RemoteIdentityProbeOutput encodes a helper result using the marker protocol
@@ -115,8 +117,10 @@ func RemoteIdentityProbeOutput(state RemoteIdentityState, identity IdentityInfo)
 			return identityMarkerUnknown
 		}
 		return identityMarkerOK + string(data)
-	case RemoteIdentityUnavailable:
-		return identityMarkerUnavailable
+	case RemoteIdentityHelperMissing:
+		return identityMarkerHelperMissing
+	case RemoteIdentityEndpointUnavailable:
+		return identityMarkerEndpointUnavailable
 	case RemoteIdentityTokenInvalid:
 		return identityMarkerTokenInvalid
 	default:
@@ -138,8 +142,10 @@ func ClassifyRemoteIdentityProbeOutput(out string) (RemoteIdentityState, Identit
 	switch {
 	case strings.Contains(out, identityMarkerTokenInvalid):
 		return RemoteIdentityTokenInvalid, IdentityInfo{}
-	case strings.Contains(out, identityMarkerUnavailable):
-		return RemoteIdentityUnavailable, IdentityInfo{}
+	case strings.Contains(out, identityMarkerHelperMissing):
+		return RemoteIdentityHelperMissing, IdentityInfo{}
+	case strings.Contains(out, identityMarkerEndpointUnavailable):
+		return RemoteIdentityEndpointUnavailable, IdentityInfo{}
 	case strings.Contains(out, identityMarkerUnknown):
 		return RemoteIdentityUnknown, IdentityInfo{}
 	default:
