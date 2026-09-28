@@ -381,7 +381,7 @@ func (s *Supervisor) recordStartFailure(cause State, exit *ExitInfo) error {
 	s.mu.Lock()
 	oldState := s.state
 	s.healthySince = time.Time{}
-	s.lastErr = fmt.Sprintf("ssh child exited with code %d after %s: %s", exit.Code, exit.Uptime.Round(time.Millisecond), exit.StderrTail)
+	s.lastErr = describeStartFailure(exit)
 	if cause == StateAuthRequired || cause == StateHostKeyError {
 		s.state = cause
 	} else {
@@ -403,6 +403,18 @@ func (s *Supervisor) recordStartFailure(cause State, exit *ExitInfo) error {
 	}
 	s.logTransition(oldState)
 	return nil
+}
+
+func describeStartFailure(exit *ExitInfo) string {
+	detail := strings.TrimSpace(exit.StderrTail)
+	if !exit.processExit {
+		return detail
+	}
+	message := fmt.Sprintf("ssh child exited with code %d after %s", exit.Code, exit.Uptime.Round(time.Millisecond))
+	if detail == "" {
+		return message
+	}
+	return message + ": " + detail
 }
 
 func (s *Supervisor) recordStartFailureAndWait(ctx context.Context, cause State, exit *ExitInfo) (bool, error) {

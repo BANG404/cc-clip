@@ -23,9 +23,10 @@ const defaultControlDirName = ".cache/cc-clip/tunnel-runtime/control"
 var ErrPortConflict = errors.New("remote forward port conflict")
 
 type ExitInfo struct {
-	Code       int
-	StderrTail string
-	Uptime     time.Duration
+	Code        int
+	StderrTail  string
+	Uptime      time.Duration
+	processExit bool
 }
 
 // Backend owns exactly one directly spawned SSH master. Forwarding is added
@@ -110,7 +111,7 @@ func (b *Backend) reap(cmd *exec.Cmd, startedAt time.Time, controlPath, controlC
 	if b.cmd == cmd {
 		b.running = false
 		b.forwarded = false
-		b.exit = &ExitInfo{Code: code, StderrTail: strings.TrimSpace(buf.Tail()), Uptime: time.Since(startedAt)}
+		b.exit = &ExitInfo{Code: code, StderrTail: strings.TrimSpace(buf.Tail()), Uptime: time.Since(startedAt), processExit: true}
 	}
 	b.mu.Unlock()
 	cleanupControlArtifacts(controlPath, controlConfig, controlDir, ephemeralDir)

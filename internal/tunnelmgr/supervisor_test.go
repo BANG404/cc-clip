@@ -397,6 +397,12 @@ func TestSupervisorForwardFailuresOpenCrashLoop(t *testing.T) {
 	if final.Runtime.State != StateCrashLoop {
 		t.Fatalf("persisted state = %q, want crash-loop", final.Runtime.State)
 	}
+	if strings.Contains(final.Runtime.LastError, "code -1") {
+		t.Fatalf("forward failure must not be reported as a child exit: %q", final.Runtime.LastError)
+	}
+	if !strings.Contains(final.Runtime.LastError, "forward request failed") {
+		t.Fatalf("forward failure detail = %q, want underlying error", final.Runtime.LastError)
+	}
 }
 
 func TestSupervisorAuthRequiredUsesAttentionWait(t *testing.T) {
@@ -489,6 +495,9 @@ func TestSupervisorCrashLoopStopsRestarting(t *testing.T) {
 	}
 	if final.Runtime.State != StateCrashLoop {
 		t.Fatalf("persisted state = %q, want crash-loop", final.Runtime.State)
+	}
+	if !strings.Contains(final.Runtime.LastError, "ssh child exited with code 255") {
+		t.Fatalf("real child exit detail = %q, want exit code", final.Runtime.LastError)
 	}
 	second, _ := newTestSupervisor(t, 18399)
 	second.Store = store
