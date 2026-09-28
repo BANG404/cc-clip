@@ -288,12 +288,13 @@ func TestSupervisorTokenInvalidKeepsMasterAndRecoversInPlace(t *testing.T) {
 	if !strings.Contains(rec.Runtime.LastError, wantCommand) {
 		t.Fatalf("token recovery detail = %q, want command %q", rec.Runtime.LastError, wantCommand)
 	}
-	logMu.Lock()
-	joinedLogs := strings.Join(logs, "\n")
-	logMu.Unlock()
-	if !strings.Contains(joinedLogs, wantCommand) {
-		t.Fatalf("token recovery log = %q, want command %q", joinedLogs, wantCommand)
-	}
+	var joinedLogs string
+	waitUntil(t, 5*time.Second, func() bool {
+		logMu.Lock()
+		joinedLogs = strings.Join(logs, "\n")
+		logMu.Unlock()
+		return strings.Contains(joinedLogs, wantCommand)
+	}, "token recovery log")
 
 	// Simulate an external `connect --token-only` repair. The next identity
 	// probe must promote the same forward to healthy without respawning SSH.
