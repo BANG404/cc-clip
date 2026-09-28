@@ -39,7 +39,7 @@ if [ "$has_n" = "1" ]; then
     authfail) echo "ssh: Permission denied (publickey,password)." >&2; exit 255 ;;
     hostkey)  echo "Host key verification failed." >&2; exit 255 ;;
     die)      [ -n "$cp" ] && echo $$ > "$cp"; sleep "${FAKE_SSH_UPTIME:-0}"; echo "Connection closed by remote host." >&2; exit 255 ;;
-    *)        [ -n "$cp" ] && echo $$ > "$cp"; trap 'rm -f "$cp"; exit 0' TERM; while :; do sleep 1; done ;;
+    *)        [ -n "$cp" ] && echo $$ > "$cp"; trap 'rm -f "$cp"; exit 0' TERM; while :; do sleep 0.05; done ;;
   esac
 fi
 case "$op" in
