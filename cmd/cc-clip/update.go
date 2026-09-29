@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,7 @@ const (
 	updateRepo          = "ShunmeiCho/cc-clip"
 	updateAPIURL        = "https://api.github.com/repos/" + updateRepo + "/releases"
 	updateDownloadBase  = "https://github.com/" + updateRepo + "/releases/download"
+	updateLatestPage    = "https://github.com/" + updateRepo + "/releases/latest"
 	updateDaemonPort    = 18339
 	updateDownloadTotal = 5 * time.Minute
 )
@@ -488,19 +490,52 @@ func githubToken() string {
 	return os.Getenv("GH_TOKEN")
 }
 
+// fetchLatestReleaseTag resolves the latest published release. It asks the
+// GitHub API first and, when that fails (typically the unauthenticated 60/hr
+// limit shared by everyone behind one NAT, #170), falls back to the
+// github.com/releases/latest redirect, which is not API-rate-limited.
 func fetchLatestReleaseTag(ctx context.Context) (string, error) {
-	req, err := newReleaseRequest(ctx, updateAPIURL+"/latest")
+	return resolveLatestReleaseTag(ctx, http.DefaultClient, updateAPIURL+"/latest", updateLatestPage)
+}
+
+func resolveLatestReleaseTag(ctx context.Context, client *http.Client, apiURL, pageURL string) (string, error) {
+	tag, apiErr := latestTagFromAPI(ctx, client, apiURL)
+	if apiErr == nil {
+		return tag, nil
+	}
+	tag, pageErr := latestTagFromRedirect(ctx, client, pageURL)
+	if pageErr == nil {
+		return tag, nil
+	}
+	return "", fmt.Errorf("%w; fallback %s also failed: %v\n%s", apiErr, pageURL, pageErr, latestLookupHint(apiErr))
+}
+
+// releaseAPIError is a non-200 answer from the releases API. ResetAt is set
+// when GitHub reported the rate-limit window's reset time.
+type releaseAPIError struct {
+	Status      int
+	Body        string
+	RateLimited bool
+	ResetAt     time.Time
+}
+
+func (e *releaseAPIError) Error() string {
+	return fmt.Sprintf("GitHub API returned %d: %s", e.Status, e.Body)
+}
+
+func latestTagFromAPI(ctx context.Context, client *http.Client, apiURL string) (string, error) {
+	req, err := newReleaseRequest(ctx, apiURL)
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", newReleaseAPIError(resp, strings.TrimSpace(string(body)))
 	}
 	var data struct {
 		TagName    string `json:"tag_name"`
@@ -517,6 +552,71 @@ func fetchLatestReleaseTag(ctx context.Context) (string, error) {
 		return "", errors.New("GitHub API returned empty tag_name")
 	}
 	return data.TagName, nil
+}
+
+func newReleaseAPIError(resp *http.Response, body string) *releaseAPIError {
+	e := &releaseAPIError{Status: resp.StatusCode, Body: body}
+	limited := resp.StatusCode == http.StatusTooManyRequests ||
+		(resp.StatusCode == http.StatusForbidden &&
+			(resp.Header.Get("X-RateLimit-Remaining") == "0" || strings.Contains(strings.ToLower(body), "rate limit")))
+	e.RateLimited = limited
+	if secs, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && secs > 0 {
+		e.ResetAt = time.Unix(secs, 0)
+	}
+	return e
+}
+
+// latestTagFromRedirect reads the tag from the Location of the
+// github.com/<repo>/releases/latest redirect, which points at
+// .../releases/tag/<tag> and never at a draft or prerelease.
+func latestTagFromRedirect(ctx context.Context, client *http.Client, pageURL string) (string, error) {
+	noFollow := *client
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "cc-clip-updater")
+	resp, err := noFollow.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return "", fmt.Errorf("expected a redirect, got HTTP %d", resp.StatusCode)
+	}
+	loc, err := resp.Location()
+	if err != nil {
+		return "", fmt.Errorf("redirect without Location: %w", err)
+	}
+	const marker = "/releases/tag/"
+	i := strings.LastIndex(loc.Path, marker)
+	if i < 0 {
+		return "", fmt.Errorf("redirect does not name a release tag: %s", loc)
+	}
+	tag, err := url.PathUnescape(strings.Trim(loc.Path[i+len(marker):], "/"))
+	if err != nil || tag == "" || strings.Contains(tag, "/") {
+		return "", fmt.Errorf("redirect does not name a release tag: %s", loc)
+	}
+	return tag, nil
+}
+
+// latestLookupHint tells the user how to update when neither lookup worked.
+func latestLookupHint(apiErr error) string {
+	var hint strings.Builder
+	var rel *releaseAPIError
+	if errors.As(apiErr, &rel) && rel.RateLimited {
+		hint.WriteString("GitHub's unauthenticated API limit (60 requests/hour, shared by everyone behind the same public IP) is used up")
+		if !rel.ResetAt.IsZero() {
+			fmt.Fprintf(&hint, "; it resets at %s", rel.ResetAt.Local().Format("15:04:05"))
+		}
+		hint.WriteString(".\n")
+	}
+	hint.WriteString("To update now, either name the version, which skips this lookup:\n")
+	hint.WriteString("  cc-clip update --to vX.Y.Z   (versions: https://github.com/" + updateRepo + "/releases)\n")
+	hint.WriteString("or authenticate the API request:\n")
+	hint.WriteString("  GH_TOKEN=$(gh auth token) cc-clip update")
+	return hint.String()
 }
 
 // detectDaemonConflict returns a human-readable conflict description if port

@@ -136,6 +136,29 @@ To force a new token: `cc-clip serve --rotate-token`.
 
 ---
 
+## `cc-clip update` Fails with "API rate limit exceeded"
+
+**Symptom:** `cc-clip update` (or `install.sh`) stops with `failed to query latest release: GitHub API returned 403: {"message":"API rate limit exceeded for <your IP>..."}` or `could not determine latest version`.
+
+**Cause:** Looking up the latest release uses the GitHub API, which allows 60 unauthenticated requests per hour per public IP. Behind a university or company NAT that budget is shared with everyone on the network, so it can be used up without you running `update` at all (#170).
+
+**Fix:** In releases after v0.12.2, `update` and `install.sh` fall back to the `github.com/.../releases/latest` redirect, which is not rate-limited, so this should no longer stop them. On an older cc-clip, or if both lookups fail, skip the lookup or authenticate it:
+
+```bash
+# Name the version (see https://github.com/ShunmeiCho/cc-clip/releases); no API call is made
+cc-clip update --to vX.Y.Z
+
+# Or send a token: 5000 requests/hour instead of 60
+GH_TOKEN=$(gh auth token) cc-clip update
+
+# Fresh install: pin the version for install.sh
+curl -fsSL https://raw.githubusercontent.com/ShunmeiCho/cc-clip/main/scripts/install.sh | CC_CLIP_VERSION=vX.Y.Z sh
+```
+
+`update` also prints when the API limit resets. Downloading the release archive itself is not affected by this limit.
+
+---
+
 ## Launchd Daemon Returns "empty" for Image Clipboard
 
 **Symptom:** `cc-clip service install` is running, but `/clipboard/type` returns `{"type":"empty"}` even when you have an image in your Mac clipboard. Running `cc-clip serve` in the foreground works correctly.

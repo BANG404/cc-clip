@@ -3,9 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -400,5 +405,77 @@ func TestSamePath(t *testing.T) {
 	}
 	if samePath(real, filepath.Join(dir, "other")) {
 		t.Errorf("samePath(real, other) = true, want false")
+	}
+}
+
+// TestResolveLatestReleaseTag pins the #170 behaviour: a rate-limited or
+// otherwise failing releases API falls back to the github.com releases/latest
+// redirect, and when both fail the error tells the user how to update anyway.
+func TestResolveLatestReleaseTag(t *testing.T) {
+	reset := time.Date(2026, 9, 29, 14, 6, 11, 0, time.Local)
+	rateLimited := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for 203.0.113.7."}`))
+	}
+	apiOK := func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"v0.12.2","draft":false,"prerelease":false}`))
+	}
+	redirectTo := func(location string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, location, http.StatusFound)
+		}
+	}
+	notFound := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
+
+	tests := []struct {
+		name         string
+		api, page    http.HandlerFunc
+		wantTag      string
+		wantPageHits int32
+		wantErrParts []string
+	}{
+		{"api answers, redirect unused", apiOK, redirectTo("/r/releases/tag/v9.9.9"), "v0.12.2", 0, nil},
+		{"rate-limited api falls back to redirect", rateLimited, redirectTo("/ShunmeiCho/cc-clip/releases/tag/v0.12.2"), "v0.12.2", 1, nil},
+		{"both fail names the ways out", rateLimited, notFound, "", 1, []string{
+			"GitHub API returned 403", "rate limit", "60 requests/hour", "resets at 14:06:11",
+			"cc-clip update --to vX.Y.Z", "GH_TOKEN=$(gh auth token) cc-clip update",
+		}},
+		{"redirect without a tag is rejected", rateLimited, redirectTo("/ShunmeiCho/cc-clip/releases"), "", 1, []string{
+			"does not name a release tag", "cc-clip update --to vX.Y.Z",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var pageHits atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/latest", tt.api)
+			mux.HandleFunc("/page/latest", func(w http.ResponseWriter, r *http.Request) {
+				pageHits.Add(1)
+				tt.page(w, r)
+			})
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+
+			tag, err := resolveLatestReleaseTag(context.Background(), ts.Client(), ts.URL+"/api/latest", ts.URL+"/page/latest")
+			if got := pageHits.Load(); got != tt.wantPageHits {
+				t.Errorf("redirect page hit %d times, want %d", got, tt.wantPageHits)
+			}
+			if tt.wantErrParts == nil {
+				if err != nil || tag != tt.wantTag {
+					t.Fatalf("got (%q, %v), want (%q, nil)", tag, err, tt.wantTag)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("got tag %q, want an error", tag)
+			}
+			for _, part := range tt.wantErrParts {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error lacks %q:\n%v", part, err)
+				}
+			}
+		})
 	}
 }
