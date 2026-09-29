@@ -120,3 +120,35 @@ func extractFencedCode(doc string) []string {
 	}
 	return blocks
 }
+
+// TestInstallScriptFallsBackWhenTheAPIIsRateLimited pins #170: the latest-tag
+// lookup must not depend on the GitHub API alone (60 requests/hour per public
+// IP, shared behind a NAT), and a failed lookup must say how to pin a version.
+func TestInstallScriptFallsBackWhenTheAPIIsRateLimited(t *testing.T) {
+	data, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	script := string(data)
+
+	for _, needle := range []string{
+		// API first, then the non-rate-limited releases/latest redirect.
+		"https://api.github.com/repos/${REPO}/releases/latest",
+		"https://github.com/${REPO}/releases/latest",
+		"url_effective",
+		"/releases/tag/",
+		// A failed lookup explains the rate limit and how to pin a version.
+		"60 API requests/hour",
+		"CC_CLIP_VERSION=vX.Y.Z sh",
+	} {
+		if !strings.Contains(script, needle) {
+			t.Fatalf("install.sh must contain %q for the rate-limit fallback", needle)
+		}
+	}
+
+	apiIdx := strings.Index(script, "https://api.github.com/repos/${REPO}/releases/latest")
+	pageIdx := strings.Index(script, "https://github.com/${REPO}/releases/latest")
+	if apiIdx == -1 || pageIdx == -1 || apiIdx > pageIdx {
+		t.Fatalf("install.sh must try the API before the releases/latest redirect")
+	}
+}

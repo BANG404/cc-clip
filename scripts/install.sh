@@ -25,17 +25,32 @@ detect_platform() {
     echo "${OS}_${ARCH}"
 }
 
+# The API answer is preferred; when it fails (the unauthenticated limit is 60
+# requests/hour per public IP, shared by everyone behind a NAT, #170) the tag
+# is read from the github.com releases/latest redirect, which is not
+# API-rate-limited and never points at a draft or prerelease.
 get_latest_version() {
+    local tag=""
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
-            grep '"tag_name"' | head -1 | cut -d'"' -f4
+        tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
+            grep '"tag_name"' | head -1 | cut -d'"' -f4)
+        if [ -z "$tag" ]; then
+            tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+                "https://github.com/${REPO}/releases/latest" 2>/dev/null | \
+                sed -n 's#.*/releases/tag/##p')
+        fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
-            grep '"tag_name"' | head -1 | cut -d'"' -f4
+        tag=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
+            grep '"tag_name"' | head -1 | cut -d'"' -f4)
+        if [ -z "$tag" ]; then
+            tag=$(wget -S --spider "https://github.com/${REPO}/releases/latest" 2>&1 | \
+                tr -d '\r' | sed -n 's#^ *Location: .*/releases/tag/\([^ ]*\).*#\1#p' | tail -1)
+        fi
     else
         echo "Error: curl or wget required" >&2
         exit 1
     fi
+    echo "$tag"
 }
 
 # Resolve the release tag to install.
@@ -105,6 +120,9 @@ main() {
 
     if [ -z "$VERSION" ]; then
         echo "Error: could not determine latest version"
+        echo "GitHub may be rate-limiting this network (60 API requests/hour per public IP)."
+        echo "Pin a version from https://github.com/${REPO}/releases instead, e.g.:"
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | CC_CLIP_VERSION=vX.Y.Z sh"
         exit 1
     fi
 
