@@ -127,6 +127,53 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestTunnelIdentityRequiresTokenAndReportsInstance(t *testing.T) {
+	srv, sess := newTestServer(&mockClipboard{})
+	srv.SetInstanceID("instance-123")
+
+	unauthorized := httptest.NewRequest("GET", "/tunnel/identity", nil)
+	unauthorized.Header.Set("User-Agent", "cc-clip")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, unauthorized)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status = %d, want 401", w.Code)
+	}
+
+	req := httptest.NewRequest("GET", "/tunnel/identity", nil)
+	req.Header.Set("Authorization", "Bearer "+sess)
+	req.Header.Set("User-Agent", "cc-clip")
+	w = httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("identity status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Service         string `json:"service"`
+		Status          string `json:"status"`
+		ProtocolVersion int    `json:"protocol_version"`
+		InstanceID      string `json:"instance_id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Service != "cc-clip" || body.Status != "ok" || body.ProtocolVersion != 1 || body.InstanceID != "instance-123" {
+		t.Fatalf("unexpected identity body: %+v", body)
+	}
+}
+
+func TestTunnelIdentityReturnsUnavailableWithoutInstance(t *testing.T) {
+	srv, sess := newTestServer(&mockClipboard{})
+	req := httptest.NewRequest("GET", "/tunnel/identity", nil)
+	req.Header.Set("Authorization", "Bearer "+sess)
+	req.Header.Set("User-Agent", "cc-clip")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("identity status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestRegisterNotificationNonceCapsRegistry(t *testing.T) {
 	srv, _ := newTestServer(&mockClipboard{})
 

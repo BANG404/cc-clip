@@ -59,6 +59,8 @@ func main() {
 		cmdService()
 	case "hosts":
 		cmdHosts()
+	case "tunnel":
+		cmdTunnel()
 	case "update":
 		cmdUpdate()
 	case "notify":
@@ -134,6 +136,24 @@ Deployment targets (connect/setup; choose at most one selector):
                      Remove Codex support from a remote host (bridge, Xvfb,
                      notify entry, DISPLAY marker)
   uninstall --codex  Remove Codex support on this machine
+
+Managed tunnel (experimental, manual only):
+  tunnel run <host>  Run the managed tunnel supervisor for <host> in the
+                     foreground. Starts a private non-interactive ssh master
+                     holding one reverse forward, probes daemon health through
+                     it, reconnects with backoff; stops cleanly on Ctrl-C.
+                     No LaunchAgent, no ~/.ssh/config changes, nothing enabled
+                     automatically. The legacy RemoteForward workflow is
+                     unchanged and remains the default.
+                     Existing hosts must first run:
+                       cc-clip connect <host> --force
+                     The experimental managed tunnel requires the identity
+                     helper at $HOME/.local/bin/cc-clip; --use-remote-bin hosts
+                     are not currently supported. Identity probes count as
+                     token use for the 30-day sliding expiration and can keep
+                     the token active while the supervisor runs.
+    --port           Tunnel port (default: 18339, env: CC_CLIP_PORT)
+    --reset          Reset persisted runtime and clear crash-loop state
 
 Local daemon and diagnostics (run on your local machine):
   serve              Run the clipboard daemon in the foreground

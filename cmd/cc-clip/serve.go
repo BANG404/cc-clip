@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shunmei/cc-clip/internal/daemon"
+	"github.com/shunmei/cc-clip/internal/instanceid"
 	"github.com/shunmei/cc-clip/internal/session"
 	"github.com/shunmei/cc-clip/internal/token"
 )
@@ -58,9 +59,15 @@ func cmdServe() {
 	if err != nil {
 		log.Fatalf("failed to write token file: %v", err)
 	}
+	tokenDir, err := token.TokenDir()
+	if err != nil {
+		log.Fatalf("failed to resolve cc-clip state directory: %v", err)
+	}
+	instanceID := loadInstanceIDOrUnavailable(tokenDir)
 
 	srv.SetTextWriter(daemon.NewClipboardTextWriter())
 	srv.SetVersion(version)
+	srv.SetInstanceID(instanceID)
 	srv.EnableNoncePersistence()
 	if receiptsPath, err := daemon.ReceiptStorePath(listener.Addr().(*net.TCPAddr).Port); err != nil {
 		log.Printf("WARN: delivery receipts disabled: %v", err)
@@ -98,4 +105,13 @@ func cmdServe() {
 	if err := srv.ServeListener(listener); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func loadInstanceIDOrUnavailable(tokenDir string) string {
+	instanceID, err := instanceid.LoadOrCreate(tokenDir)
+	if err != nil {
+		log.Printf("WARN: tunnel identity unavailable: %v", err)
+		return ""
+	}
+	return instanceID
 }

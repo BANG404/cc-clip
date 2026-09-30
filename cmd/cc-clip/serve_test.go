@@ -77,3 +77,14 @@ func TestServeRotateTokenLeavesTokenUntouchedWhenPortTaken(t *testing.T) {
 		t.Fatal("serve --rotate-token replaced or modified the shared token file despite losing the port race")
 	}
 }
+
+func TestLoadInstanceIDOrUnavailableAllowsIncompleteIdentity(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "instance-id"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := loadInstanceIDOrUnavailable(dir); got != "" {
+		t.Fatalf("loadInstanceIDOrUnavailable() = %q, want unavailable identity", got)
+	}
+}

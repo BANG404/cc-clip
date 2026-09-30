@@ -82,6 +82,7 @@ type Server struct {
 	receiptCh         chan receiptEvent   // nil until EnableDeliveryReceipts; drained by the single receipt writer
 	receiptDrops      atomic.Int64        // receipts dropped on a full queue; reported by the writer, never the handler
 	version           string              // reported by /health when set via SetVersion (#22 P2)
+	instanceID        string              // authenticated installation identity for managed tunnels
 }
 
 func NewServer(addr string, clipboard ClipboardReader, tokens *token.Manager, sessions *session.Store) *Server {
@@ -98,6 +99,7 @@ func NewServer(addr string, clipboard ClipboardReader, tokens *token.Manager, se
 		mux:               http.NewServeMux(),
 	}
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /tunnel/identity", s.authMiddleware(s.handleTunnelIdentity))
 	s.mux.HandleFunc("GET /clipboard/type", s.authMiddleware(s.handleClipboardType))
 	s.mux.HandleFunc("GET /clipboard/image", s.authMiddleware(s.handleClipboardImage))
 	s.mux.HandleFunc("GET /clipboard/text", s.authMiddleware(s.handleClipboardText))
@@ -520,6 +522,12 @@ func (s *Server) SetVersion(v string) {
 	s.version = v
 }
 
+// SetInstanceID sets the stable installation identity returned by the
+// authenticated managed-tunnel probe.
+func (s *Server) SetInstanceID(id string) {
+	s.instanceID = id
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	body := map[string]string{"status": "ok", "service": "cc-clip"}
@@ -527,6 +535,25 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		body["version"] = s.version
 	}
 	json.NewEncoder(w).Encode(body)
+}
+
+func (s *Server) handleTunnelIdentity(w http.ResponseWriter, r *http.Request) {
+	if s.instanceID == "" {
+		http.Error(w, "tunnel identity unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Service         string `json:"service"`
+		Status          string `json:"status"`
+		ProtocolVersion int    `json:"protocol_version"`
+		InstanceID      string `json:"instance_id"`
+	}{
+		Service:         "cc-clip",
+		Status:          "ok",
+		ProtocolVersion: 1,
+		InstanceID:      s.instanceID,
+	})
 }
 
 // handleRegisterNonce accepts a notification nonce from an authenticated
