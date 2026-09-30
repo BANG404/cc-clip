@@ -194,11 +194,36 @@ func resolveInInteractiveShell(host, bin string) (string, error) {
 	}
 
 	out, err := remoteExecNoForward(host, fmt.Sprintf(
-		`%s -ic 'which %s 2>/dev/null || echo "not in PATH"'`,
+		`%s -ic 'echo "%s$(which %s 2>/dev/null || echo "not in PATH")"'`,
 		shellName,
+		interactiveResolveMarker,
 		bin,
 	))
-	return strings.TrimSpace(out), err
+	return parseInteractiveResolution(out), err
+}
+
+// interactiveResolveMarker prefixes the answer on the same line, so it can be
+// told apart from whatever else the interactive shell prints: a TTY-less
+// `bash -i` writes job-control warnings to stderr, and rc files may echo to
+// stdout (#175). stderr and stdout travel on separate SSH channels, so a
+// warning can land anywhere in the captured output, even between two stdout
+// lines; one line that carries both marker and answer cannot be split.
+const interactiveResolveMarker = "cc-clip-resolved:"
+
+// parseInteractiveResolution returns the answer from the last marker line, or
+// the whole trimmed output when the marker never printed (the shell failed to
+// start), so the failure stays visible in the doctor message.
+func parseInteractiveResolution(out string) string {
+	answer, found := "", false
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
+		if i := strings.Index(line, interactiveResolveMarker); i >= 0 {
+			answer, found = strings.TrimSpace(line[i+len(interactiveResolveMarker):]), true
+		}
+	}
+	if !found {
+		return strings.TrimSpace(out)
+	}
+	return answer
 }
 
 func tunnelOK(results []CheckResult) bool {

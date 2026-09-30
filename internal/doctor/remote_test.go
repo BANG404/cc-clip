@@ -138,6 +138,53 @@ func TestClassifyRemoteTokenCheck(t *testing.T) {
 	}
 }
 
+// TestParseInteractiveResolution pins #175: a TTY-less `bash -i` prints
+// job-control warnings (and rc files may echo), and none of that may reach the
+// path-order message; only the resolved answer after the marker does.
+func TestParseInteractiveResolution(t *testing.T) {
+	t.Parallel()
+	jobControl := "bash: cannot set terminal process group (1884836): Inappropriate ioctl for device\n" +
+		"bash: no job control in this shell\n"
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{
+			name: "job-control warnings before the answer",
+			out:  jobControl + interactiveResolveMarker + "/home/u/.local/bin/xclip\n",
+			want: "/home/u/.local/bin/xclip",
+		},
+		{
+			name: "rc file echoes on stdout",
+			out:  "Welcome back!\r\n" + interactiveResolveMarker + "/usr/bin/xclip\r\n",
+			want: "/usr/bin/xclip",
+		},
+		{
+			name: "not in PATH fallback survives",
+			out:  jobControl + interactiveResolveMarker + "not in PATH\n",
+			want: "not in PATH",
+		},
+		{
+			name: "stderr warning arriving after the stdout answer",
+			out:  interactiveResolveMarker + "/home/u/.local/bin/xclip\n" + jobControl,
+			want: "/home/u/.local/bin/xclip",
+		},
+		{
+			name: "marker missing keeps the raw output visible",
+			out:  "bash: command not found\n",
+			want: "bash: command not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseInteractiveResolution(tt.out); got != tt.want {
+				t.Fatalf("parseInteractiveResolution(%q) = %q, want %q", tt.out, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestRemoteBinProbeCommand pins the remote-bin check's resolution order
 // (#111 review, finding 1): the deployed ~/.local/bin/cc-clip is the PRIMARY
 // probe — it is the binary cc-clip manages — and the login-shell PATH lookup
