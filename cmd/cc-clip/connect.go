@@ -975,6 +975,7 @@ func prepareBinaryLocal(host, remoteOS, remoteArch string) (localBin string, err
 			remoteOS, remoteArch, dlErr, host)
 	}
 
+	fmt.Printf("      cross-compiling cc-clip %s from %s\n", version, describeCrossCompileSource(srcDir))
 	tmpBin := filepath.Join(os.TempDir(), fmt.Sprintf("cc-clip-%s-%s", remoteOS, remoteArch))
 	buildCmd := exec.Command("go", crossCompileArgs(tmpBin, version)...)
 	buildCmd.Dir = srcDir
@@ -983,6 +984,53 @@ func prepareBinaryLocal(host, remoteOS, remoteArch string) (localBin string, err
 		return "", fmt.Errorf("cross-compile failed: %s: %w", string(out), err)
 	}
 	return tmpBin, nil
+}
+
+// Release downloads fail on a stall, not on a slow link: curl aborts when the
+// transfer stays under releaseDownloadStallFloor bytes/s for
+// releaseDownloadStallWindow, and never runs past updateDownloadTotal, the
+// budget cc-clip update gives the same archive (#174). An unreachable host
+// still fails within releaseDownloadConnectTimeout.
+const (
+	releaseDownloadConnectTimeout = 15 * time.Second
+	releaseDownloadStallFloor     = 1024 // bytes per second
+	releaseDownloadStallWindow    = 30 * time.Second
+)
+
+func releaseDownloadArgs(dest, url string) []string {
+	return []string{
+		"-fsSL",
+		"--connect-timeout", strconv.Itoa(int(releaseDownloadConnectTimeout.Seconds())),
+		"--speed-limit", strconv.Itoa(releaseDownloadStallFloor),
+		"--speed-time", strconv.Itoa(int(releaseDownloadStallWindow.Seconds())),
+		"--max-time", strconv.Itoa(int(updateDownloadTotal.Seconds())),
+		"-o", dest, url,
+	}
+}
+
+// describeCrossCompileSource names the tree the cross-compile fallback builds
+// from. findSourceDir takes the first go.mod near the executable or in the
+// current directory, so a checkout on another branch would otherwise ship
+// unreleased code under the local version without any hint (#174).
+func describeCrossCompileSource(dir string) string {
+	commit, err := exec.Command("git", "-C", dir, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return formatCrossCompileSource(dir, "", false)
+	}
+	status, err := exec.Command("git", "-C", dir, "status", "--porcelain", "--untracked-files=no").Output()
+	modified := err == nil && len(strings.TrimSpace(string(status))) > 0
+	return formatCrossCompileSource(dir, strings.TrimSpace(string(commit)), modified)
+}
+
+func formatCrossCompileSource(dir, commit string, modified bool) string {
+	switch {
+	case commit == "":
+		return dir
+	case modified:
+		return fmt.Sprintf("%s (commit %s, with uncommitted changes)", dir, commit)
+	default:
+		return fmt.Sprintf("%s (commit %s)", dir, commit)
+	}
 }
 
 func crossCompileArgs(outputPath, buildVersion string) []string {
@@ -1033,7 +1081,7 @@ func downloadReleaseBinary(targetOS, targetArch string) (string, error) {
 	}
 
 	archivePath := filepath.Join(tmpDir, archiveName)
-	dlCmd := exec.Command("curl", "-fsSL", "--max-time", "30", "-o", archivePath, url)
+	dlCmd := exec.Command("curl", releaseDownloadArgs(archivePath, url)...)
 	if out, err := dlCmd.CombinedOutput(); err != nil {
 		os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("download failed (%s): %s", url, string(out))
@@ -1045,7 +1093,7 @@ func downloadReleaseBinary(targetOS, targetArch string) (string, error) {
 	// mismatch or missing entry, refuse to extract.
 	checksumsURL := fmt.Sprintf("https://github.com/ShunmeiCho/cc-clip/releases/download/v%s/checksums.txt", ver)
 	checksumsPath := filepath.Join(tmpDir, "checksums.txt")
-	csCmd := exec.Command("curl", "-fsSL", "--max-time", "30", "-o", checksumsPath, checksumsURL)
+	csCmd := exec.Command("curl", releaseDownloadArgs(checksumsPath, checksumsURL)...)
 	if out, err := csCmd.CombinedOutput(); err != nil {
 		os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("checksums download failed (%s): %s", checksumsURL, string(out))

@@ -467,6 +467,58 @@ func TestCrossCompileArgsInjectVersion(t *testing.T) {
 	}
 }
 
+// TestReleaseDownloadArgsFailOnStallNotSlowLink pins #174: a 3.4 MB archive at
+// ~52 KB/s must not hit a fixed 30 s cap. curl aborts only on a sustained
+// stall, and the overall cap matches cc-clip update's budget.
+func TestReleaseDownloadArgsFailOnStallNotSlowLink(t *testing.T) {
+	args := releaseDownloadArgs("/tmp/cc-clip.tar.gz", "https://example.test/cc-clip.tar.gz")
+	joined := strings.Join(args, "\x00")
+	for _, want := range []string{
+		"--speed-limit\x00" + strconv.Itoa(releaseDownloadStallFloor),
+		"--speed-time\x00" + strconv.Itoa(int(releaseDownloadStallWindow.Seconds())),
+		"--max-time\x00" + strconv.Itoa(int(updateDownloadTotal.Seconds())),
+		"--connect-timeout\x00" + strconv.Itoa(int(releaseDownloadConnectTimeout.Seconds())),
+		"-o\x00/tmp/cc-clip.tar.gz\x00https://example.test/cc-clip.tar.gz",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("releaseDownloadArgs() = %q, missing %q", args, want)
+		}
+	}
+	const slowLinkBytes, slowLinkRate = 3_421_110, 52_000 // the #174 report
+	if needed := slowLinkBytes / slowLinkRate; int(updateDownloadTotal.Seconds()) <= needed {
+		t.Fatalf("overall cap %s cannot finish the reported slow download (%d s)", updateDownloadTotal, needed)
+	}
+	if releaseDownloadStallFloor >= slowLinkRate {
+		t.Fatalf("stall floor %d B/s would abort the reported %d B/s link", releaseDownloadStallFloor, slowLinkRate)
+	}
+}
+
+func TestFormatCrossCompileSource(t *testing.T) {
+	tests := []struct {
+		name, commit string
+		modified     bool
+		want         string
+	}{
+		{"not a git checkout", "", false, "/src"},
+		{"clean checkout", "39a3dda", false, "/src (commit 39a3dda)"},
+		{"modified checkout", "39a3dda", true, "/src (commit 39a3dda, with uncommitted changes)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatCrossCompileSource("/src", tt.commit, tt.modified); got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDescribeCrossCompileSourceOutsideGit(t *testing.T) {
+	dir := t.TempDir()
+	if got := describeCrossCompileSource(dir); got != dir {
+		t.Fatalf("describeCrossCompileSource(non-repo) = %q, want the bare directory", got)
+	}
+}
+
 func TestReleaseVersion(t *testing.T) {
 	tests := []struct {
 		input string
