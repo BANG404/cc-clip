@@ -891,7 +891,16 @@ func connectVerifyTunnel(session *shim.SSHSession, port int, host string, target
 		fmt.Printf("      tunnel probe could not be executed over SSH: %v\n", probeErr)
 		fmt.Println("      The SSH session appears to be down; re-run 'cc-clip connect' once SSH is reachable.")
 	} else {
-		for _, line := range tunnelVerificationReport(tunnel.ClassifyRemoteProbeOutput(probeOut), port, host) {
+		state := tunnel.ClassifyRemoteProbeOutput(probeOut)
+		var sessions []tunnel.SSHDSession
+		if state == tunnel.RemoteTunnelStale {
+			// Best-effort: list the user's sshd sessions so the holder can be
+			// found without root (#173). A failure only drops the list.
+			if out, err := session.Exec(tunnel.RemoteSSHDSessionsCommand()); err == nil {
+				sessions = tunnel.ParseSSHDSessions(out)
+			}
+		}
+		for _, line := range tunnelVerificationReport(state, port, host, sessions) {
 			fmt.Println(line)
 		}
 	}
