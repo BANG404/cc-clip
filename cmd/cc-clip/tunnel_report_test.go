@@ -24,7 +24,7 @@ func TestTunnelVerificationReportNeverClaimsSuccessWithoutDaemon(t *testing.T) {
 		tunnel.RemoteTunnelUnknown,
 	}
 	for _, state := range notHealthy {
-		got := joinReport(tunnelVerificationReport(state, 18339, "venus"))
+		got := joinReport(tunnelVerificationReport(state, 18339, "venus", nil))
 		if strings.Contains(got, "tunnel verified") {
 			t.Fatalf("state %q must not report a verified tunnel, got:\n%s", state, got)
 		}
@@ -33,7 +33,7 @@ func TestTunnelVerificationReportNeverClaimsSuccessWithoutDaemon(t *testing.T) {
 		}
 	}
 
-	ok := joinReport(tunnelVerificationReport(tunnel.RemoteTunnelOK, 18339, "venus"))
+	ok := joinReport(tunnelVerificationReport(tunnel.RemoteTunnelOK, 18339, "venus", nil))
 	if !strings.Contains(ok, "tunnel verified") {
 		t.Fatalf("healthy state must report a verified tunnel, got:\n%s", ok)
 	}
@@ -44,11 +44,21 @@ func TestTunnelVerificationReportNeverClaimsSuccessWithoutDaemon(t *testing.T) {
 // when the real cause is a dead local daemon (or vice versa) is the failure
 // mode this replaces.
 func TestTunnelVerificationReportStaleNamesBothCauses(t *testing.T) {
-	got := strings.ToLower(joinReport(tunnelVerificationReport(tunnel.RemoteTunnelStale, 18339, "venus")))
+	sessions := []tunnel.SSHDSession{
+		{PID: 1881174, Started: "Wed Sep 30 21:24:10 2026", Title: "sshd: alice@notty"},
+		{PID: 1886713, Started: "Wed Sep 30 21:26:18 2026", Title: "sshd: alice@notty", Current: true},
+	}
+	got := strings.ToLower(joinReport(tunnelVerificationReport(tunnel.RemoteTunnelStale, 18339, "venus", sessions)))
 
-	for _, want := range []string{"stale", "cc-clip serve", "lsof"} {
+	for _, want := range []string{"stale", "cc-clip serve", "1881174", "(this check; not the holder)", "clearallforwardings=yes venus 'kill <pid>'"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stale guidance must mention %q, got:\n%s", want, got)
+		}
+	}
+	// #173: an unprivileged remote user has neither lsof nor sudo to follow.
+	for _, unwanted := range []string{"lsof", "sudo"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("stale guidance must not depend on %q, got:\n%s", unwanted, got)
 		}
 	}
 	// The RemoteForward advice belongs to the "nothing listening" case; on a
@@ -62,7 +72,7 @@ func TestTunnelVerificationReportStaleNamesBothCauses(t *testing.T) {
 // pre-existing, correct advice for the common "no interactive SSH session is
 // open" case.
 func TestTunnelVerificationReportDownKeepsRemoteForwardGuidance(t *testing.T) {
-	got := joinReport(tunnelVerificationReport(tunnel.RemoteTunnelDown, 18339, "venus"))
+	got := joinReport(tunnelVerificationReport(tunnel.RemoteTunnelDown, 18339, "venus", nil))
 
 	if !strings.Contains(got, "RemoteForward 18339 127.0.0.1:18339") {
 		t.Fatalf("down guidance must keep the ssh_config snippet, got:\n%s", got)
@@ -73,7 +83,7 @@ func TestTunnelVerificationReportDownKeepsRemoteForwardGuidance(t *testing.T) {
 }
 
 func TestTunnelVerificationReportUnknownAdmitsItDidNotRun(t *testing.T) {
-	got := strings.ToLower(joinReport(tunnelVerificationReport(tunnel.RemoteTunnelUnknown, 18339, "venus")))
+	got := strings.ToLower(joinReport(tunnelVerificationReport(tunnel.RemoteTunnelUnknown, 18339, "venus", nil)))
 
 	if !strings.Contains(got, "did not complete") {
 		t.Fatalf("unknown guidance must say the check did not complete, got:\n%s", got)

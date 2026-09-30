@@ -61,30 +61,43 @@ This ensures every SSH connection creates a fresh tunnel. The trade-off is sligh
 
 ## Stale sshd Process Blocks RemoteForward
 
-**Symptom:** `ssh myserver` shows `Warning: remote port forwarding failed for listen port 18339`. The tunnel never works regardless of how many times you reconnect.
+**Symptom:** one of these, on a host where paste used to work:
 
-**Cause:** A previous SSH session left a stale `sshd` child process on the remote server that is still holding port 18339. New SSH connections cannot bind `RemoteForward` to a port that's already in use.
+- `ssh myserver` shows `Warning: remote port forwarding failed for listen port 18339`;
+- on the remote, `curl -s http://127.0.0.1:18339/health` connects and then hangs with no output;
+- `cc-clip doctor --host myserver` reports `tunnel: [FAIL] port 18339 accepts connections but no cc-clip daemon answered`.
 
-**Diagnosis (on remote):**
+**Cause:** every `ssh myserver` takes the `RemoteForward` from your SSH config, and only the first one gets the port. If that session's client disappears without closing it cleanly (a network drop, a laptop sleep, a tool's background connection that reconnected), its `sshd` on the remote can keep the port while nothing on your machine answers. Later sessions, including new interactive ones, cannot take the port and SSH does not retry.
+
+**Diagnosis:** `cc-clip doctor --host myserver` and `cc-clip connect` list your own `sshd` sessions on the remote with their start times when they see this, and mark the session the check itself ran under. You can also list them yourself; no root is needed:
 
 ```bash
-sudo ss -tlnp | grep 18339
-# Shows: sshd,pid=XXXXX listening on 18339
+# On the remote: your sshd sessions and when they started
+ps -o pid,lstart,args -u "$(id -u)" | grep '[s]shd'
+
+# On this machine: the ssh clients still running
+ps -o pid,lstart,command -ax | grep '[s]sh'
 ```
+
+The holder is the remote session with no matching client here. `lsof` and `ss -p` usually cannot show it to a normal user: `sshd` marks itself non-dumpable, so even your own session's sockets are hidden.
 
 **Fix:**
 
 ```bash
-# On remote: kill the stale sshd process
-sudo kill <PID>
+# End the stale session. ClearAllForwardings keeps this ssh from taking the port itself.
+ssh -o ClearAllForwardings=yes myserver 'kill <PID>'
 
-# Then reconnect from local
+# Then open a new session (reconnect the one you had) and check
 ssh myserver
 curl -s http://127.0.0.1:18339/health
-# Expected: {"status":"ok"}
+# Expected: {"service":"cc-clip","status":"ok",...}
 ```
 
-**Prevention:** Update to the latest cc-clip. The `connect` command uses `ClearAllForwardings=yes` for its internal SSH session, so it never competes for the RemoteForward port.
+**Prevention:**
+
+- If you administer the remote, set `ClientAliveInterval 30` and `ClientAliveCountMax 3` in its `sshd_config`, so `sshd` drops a session whose client is gone after about 90 seconds.
+- cc-clip's own `connect`, `doctor` and `send` connections use `ClearAllForwardings=yes`, so they never take the port. Other tools that open background SSH connections to the same host alias do take it.
+- Managed per-host tunnels (#108) remove the competition for the port altogether.
 
 ---
 

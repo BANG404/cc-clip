@@ -68,7 +68,17 @@ func RunRemote(host string, port int) []CheckResult {
 	// sshd forward keeps the port in LISTEN after its session is gone, so the
 	// handshake succeeds while nothing reaches the daemon.
 	out, err = remoteExecNoForward(host, tunnel.RemoteHealthProbeCommand(port))
-	results = append(results, classifyTunnelCheck(out, err, port))
+	tunnelResult := classifyTunnelCheck(out, err, port)
+	if err == nil && tunnel.ClassifyRemoteProbeOutput(out) == tunnel.RemoteTunnelStale {
+		// Best-effort: the holder is one of the user's sshd sessions and
+		// cannot be found without root any other way (#173).
+		sessOut, sessErr := remoteExecNoForward(host, tunnel.RemoteSSHDSessionsCommand())
+		if sessErr != nil {
+			sessOut = ""
+		}
+		tunnelResult = withStaleForwardGuidance(tunnelResult, host, port, sessOut)
+	}
+	results = append(results, tunnelResult)
 
 	// Check token on remote
 	out, err = remoteExecNoForward(host, "test -f ~/.cache/cc-clip/session.token && echo 'present' || echo 'missing'")
@@ -117,6 +127,14 @@ func classifyTunnelCheck(out string, err error, port int) CheckResult {
 	}
 	state := tunnel.ClassifyRemoteProbeOutput(out)
 	return CheckResult{"tunnel", state.Healthy(), state.Summary(port)}
+}
+
+// withStaleForwardGuidance appends the user's remote sshd sessions and the
+// unprivileged way to end the one holding the port to a stale tunnel result.
+func withStaleForwardGuidance(r CheckResult, host string, port int, sessionsOut string) CheckResult {
+	guidance := tunnel.StaleForwardGuidance(host, port, tunnel.ParseSSHDSessions(sessionsOut), "      ")
+	r.Message += "\n" + strings.Join(guidance, "\n")
+	return r
 }
 
 // classifyRemoteTokenCheck turns the result of the remote token-presence probe

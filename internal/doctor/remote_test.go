@@ -311,3 +311,26 @@ func TestClassifyNotifyPresenceChecks(t *testing.T) {
 		t.Fatalf("missing hook script must fail: %+v", got)
 	}
 }
+
+// TestWithStaleForwardGuidance pins #173: a stale tunnel result names the
+// user's sshd sessions and an unprivileged way to end the holder, and stays a
+// failure.
+func TestWithStaleForwardGuidance(t *testing.T) {
+	stale := CheckResult{"tunnel", false, "port 18339 accepts connections but no cc-clip daemon answered"}
+	out := "cc-clip-sshd-self:22\ncc-clip-sshd:11\tWed Sep 30 21:24:10 2026\tsshd: alice@notty\ncc-clip-sshd:22\tWed Sep 30 21:26:18 2026\tsshd: alice@notty\n"
+
+	got := withStaleForwardGuidance(stale, "venus", 18339, out)
+	if got.OK || got.Name != "tunnel" {
+		t.Fatalf("result must stay a failed tunnel check: %+v", got)
+	}
+	for _, want := range []string{stale.Message, "PID 11", "PID 22", "(this check; not the holder)", "ssh -o ClearAllForwardings=yes venus 'kill <PID>'"} {
+		if !strings.Contains(got.Message, want) {
+			t.Errorf("message lacks %q:\n%s", want, got.Message)
+		}
+	}
+	for _, unwanted := range []string{"lsof", "sudo"} {
+		if strings.Contains(got.Message, unwanted) {
+			t.Errorf("message must not depend on %q:\n%s", unwanted, got.Message)
+		}
+	}
+}

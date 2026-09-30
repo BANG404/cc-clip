@@ -14,21 +14,26 @@ import (
 // port is held by something that is not a cc-clip daemon" into one message is
 // what previously sent operators to fix RemoteForward while the real cause was
 // a stale sshd or a stopped local daemon.
-func tunnelVerificationReport(state tunnel.RemoteTunnelState, port int, host string) []string {
+//
+// sessions lists the user's remote sshd sessions; it is only used for the
+// stale state, where one of them holds the port (#173).
+func tunnelVerificationReport(state tunnel.RemoteTunnelState, port int, host string, sessions []tunnel.SSHDSession) []string {
 	switch state {
 	case tunnel.RemoteTunnelOK:
 		return []string{"      tunnel verified (cc-clip daemon answered through the existing SSH session)"}
 
 	case tunnel.RemoteTunnelStale:
-		return []string{
+		lines := []string{
 			fmt.Sprintf("      WARNING: port %d is held on the remote, but no cc-clip daemon answered.", port),
 			"      The port being open does NOT mean the tunnel works. Two known causes:",
 			"        1. A stale sshd from a previous SSH session still owns the forward.",
-			fmt.Sprintf("           On the remote, find and end it: lsof -ti tcp:%d", port),
+		}
+		lines = append(lines, tunnel.StaleForwardGuidance(host, port, sessions, "           ")...)
+		return append(lines,
 			"        2. The forward is live but the local daemon is not running.",
 			"           On this machine, start it: cc-clip serve",
 			fmt.Sprintf("      Then re-run: cc-clip doctor --host %s", host),
-		}
+		)
 
 	case tunnel.RemoteTunnelUnverified:
 		return []string{
