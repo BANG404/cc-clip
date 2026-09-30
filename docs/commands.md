@@ -42,6 +42,7 @@ Complete cc-clip command reference. For what each feature is for and what you sh
 | `cc-clip connect <host> --no-hooks` / `--hooks` | Persistently disable / re-enable Claude Code hook injection |
 | `cc-clip connect <host> --local-bin <path>` | Deploy this pre-downloaded remote binary instead of fetching one |
 | `cc-clip connect <host> --port <n>` | Use a tunnel port other than 18339 |
+| `cc-clip tunnel run <host>` | **Experimental.** Foreground managed tunnel: a private SSH master holds the reverse forward, probes the daemon through it and reconnects with backoff. Needs `connect <host> --force` once (for the remote identity helper at `~/.local/bin/cc-clip`); not supported for `--use-remote-bin` hosts. `--port` for a non-default port, `--reset` to clear persisted crash-loop state |
 | `cc-clip hosts list` | Show hosts this machine has deployed to (version, Codex, last seen) |
 | `cc-clip hosts forget <host>` | Stop tracking a host locally; the remote is not touched |
 | `cc-clip uninstall` | **On the remote host:** remove the clipboard shim and restore a program adopted with `--adopt-foreign-shim`. `--target wl-paste` on Wayland (also covers `wl-copy`); `--path` for a non-default install directory |
@@ -95,6 +96,7 @@ and tmux copy-mode — is covered in [reverse copy](reverse-copy.md).
 |---------|-------------|
 | `cc-clip install` | Install the shim; `connect` runs it on the remote (`--target`, `--path`, `--port`, `--adopt-foreign-shim`) |
 | `cc-clip plugin run <name>` | Notification hook each agent calls: `claude-notify`, `codex-notify`, `opencode-notify`, `agy-notify`, `cursor-notify` |
+| `cc-clip tunnel probe-identity` | Remote side of the managed tunnel's identity check; `tunnel run` invokes it over SSH |
 | `cc-clip x11-bridge` | Serve the clipboard to Codex through Xvfb; started by `connect --codex` |
 
 ## Environment variables

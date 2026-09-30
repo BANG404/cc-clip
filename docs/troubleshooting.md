@@ -97,7 +97,7 @@ curl -s http://127.0.0.1:18339/health
 
 - If you administer the remote, set `ClientAliveInterval 30` and `ClientAliveCountMax 3` in its `sshd_config`, so `sshd` drops a session whose client is gone after about 90 seconds.
 - cc-clip's own `connect`, `doctor` and `send` connections use `ClearAllForwardings=yes`, so they never take the port. Other tools that open background SSH connections to the same host alias do take it.
-- Managed per-host tunnels (#108) remove the competition for the port altogether.
+- `cc-clip tunnel run myserver` (experimental, #108) keeps the forward on a private SSH connection that reconnects by itself, so a stale interactive session no longer decides whether paste works.
 
 ---
 
