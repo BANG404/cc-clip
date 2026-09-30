@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md @ a6e618336aa17b7664a308398ae10e5e05c7fcb4 -->
+<!-- i18n-source: README.md @ ece56f51cdfa23c37c4f7eccad92c97f16fb306d -->
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -252,6 +252,28 @@ Windows サポートは引き続き実験的です。まずは [Windows クイ�
 
 - **結果:** `cc-clip hosts list` がそのホストの新しいバージョンを表示します。
 
+### トンネルを単独で維持する (実験的)
+
+- **内容:** `cc-clip tunnel run myserver` はホストへの専用 SSH 接続を維持し、その接続で
+  貼り付け用のトンネルを保持します。デーモン経由でトンネルを確認し、切断されるとバックオフ
+  しながら再接続します。
+- **理由:** 通常は、最初に接続した `ssh myserver` がトンネルを持ちます。そのセッションを閉じた
+  り、不安定な回線でクライアントが消えてもリモート側がポートを保持し続けたりすると、その
+  セッションを見つけて終了するまで貼り付けが使えなくなります
+  （[トラブルシューティング](docs/troubleshooting.md#stale-sshd-process-blocks-remoteforward)を参照してください）。
+- **使い方:** ホストごとに一度デプロイし、あとはターミナルで動かしたままにしてください。
+
+  ```bash
+  cc-clip connect myserver --force   # supervisor が確認するヘルパーをデプロイ
+  cc-clip tunnel run myserver        # フォアグラウンドで実行。Ctrl-C で停止
+  ```
+
+- **結果:** `managed tunnel state: healthy` のようなタイムスタンプ付きの行が表示され、再接続や
+  待機のたびに新しい状態が出力されます。SSH の設定は変更しないため、対話的な `ssh myserver`
+  も同じポートを要求します。そちらが先にポートを取った場合、supervisor は `port-conflict` を
+  報告して待機します。`--use-remote-bin` で設定したホストはまだサポートしていません。また、
+  supervisor の実行中は token が期限切れになりません。
+
 ### ホストから cc-clip を削除する
 
 - **内容:** `setup` / `connect` がインストールしたものを元に戻します。
@@ -350,6 +372,7 @@ adapter の詳細、手動設定、nonce 登録、診断については、
 | `cc-clip hosts forget HOST` | その一覧からホストを削除します。リモートには触れません。 |
 | `cc-clip uninstall --host HOST` | ホストから管理対象の Claude フックと PATH marker を削除します。先にホスト上で `cc-clip uninstall` を実行してください。[cc-clip の削除](#ホストから-cc-clip-を削除する)を参照してください。 |
 | `cc-clip uninstall --codex --host HOST` | ホストから Codex サポートを削除します。ブリッジと Xvfb を停止し、Codex の `notify` エントリとディスプレイ設定を取り除きます。 |
+| `cc-clip tunnel run HOST` | **実験的。**最初にポートを取った `ssh` セッションに頼らず、専用の SSH 接続でホストの貼り付け用トンネルを保持し、再接続します。Ctrl-C までフォアグラウンドで動きます。先に一度 `connect HOST --force` を実行してください。`--reset` で作動したクラッシュループ保護を解除します。[トンネルを単独で維持する](#トンネルを単独で維持する-実験的)を参照してください。 |
 
 **ローカルマシンで: デーモンと自分のインストール**
 
@@ -386,6 +409,7 @@ adapter の詳細、手動設定、nonce 登録、診断については、
 | `cc-clip install` | shim をインストールします。`connect` がリモートで実行します。 |
 | `cc-clip plugin run NAME` | 各 agent が呼び出す通知フックです（`claude-notify`、`codex-notify`、`opencode-notify`、`agy-notify`、`cursor-notify`）。 |
 | `cc-clip x11-bridge` | Xvfb 経由で Codex にクリップボードを渡します。`connect --codex` が起動します。 |
+| `cc-clip tunnel probe-identity` | リモートでマネージドトンネルの identity チェックに応答します。`tunnel run` が呼び出します。 |
 
 ### 設定
 

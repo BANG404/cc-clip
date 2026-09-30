@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md @ a6e618336aa17b7664a308398ae10e5e05c7fcb4 -->
+<!-- i18n-source: README.md @ ece56f51cdfa23c37c4f7eccad92c97f16fb306d -->
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -247,6 +247,25 @@ Windows 支持仍处于实验阶段。请先使用 [Windows 快速开始](docs/w
 
 - **你会看到：**`cc-clip hosts list` 显示该主机已是新版本。
 
+### 让隧道自行保持连接 (实验性)
+
+- **作用：**`cc-clip tunnel run myserver` 会维护一条到主机的私有 SSH 连接，由它持有粘贴用的
+  隧道，并通过守护进程检查隧道状态，断开后按退避策略自动重连。
+- **为什么：**平时是哪个 `ssh myserver` 先连上，隧道就归哪个会话。那个会话一关闭，或者在
+  不稳定的网络上客户端消失而远程仍占着端口，粘贴就会失效，直到你找出并结束那个会话
+  （参见[故障排查指南](docs/troubleshooting.md#stale-sshd-process-blocks-remoteforward)）。
+- **怎么用：**每台主机先部署一次，然后让它在一个终端里持续运行：
+
+  ```bash
+  cc-clip connect myserver --force   # 部署 supervisor 要探测的辅助程序
+  cc-clip tunnel run myserver        # 前台运行；按 Ctrl-C 停止
+  ```
+
+- **你会看到：**带时间戳的日志，例如 `managed tunnel state: healthy`，每次重连或等待时都会
+  打印新的状态行。它不会修改你的 SSH 配置，所以交互式的 `ssh myserver` 仍会申请同一个端口：
+  如果它先拿到端口，supervisor 会报告 `port-conflict` 并等待。用 `--use-remote-bin` 设置的
+  主机暂不支持；supervisor 运行期间，token 会一直保持有效。
+
 ### 从主机上移除 cc-clip
 
 - **作用：**撤销 `setup` / `connect` 安装的内容。
@@ -344,6 +363,7 @@ Notifications
 | `cc-clip hosts forget HOST` | 从上述列表中移除一台主机，不会动远程。 |
 | `cc-clip uninstall --host HOST` | 从主机上移除托管的 Claude hook 和 PATH 标记。请先在该主机上运行 `cc-clip uninstall`；参见[从主机上移除 cc-clip](#从主机上移除-cc-clip)。 |
 | `cc-clip uninstall --codex --host HOST` | 从主机上移除 Codex 支持：停止桥接器和 Xvfb，删除 Codex 的 `notify` 配置和显示设置。 |
+| `cc-clip tunnel run HOST` | **实验性。**由一条私有 SSH 连接持有并维护主机的粘贴隧道，断开后自动重连，而不是依赖先拿到端口的那个 `ssh` 会话。前台运行直到 Ctrl-C；需要先运行一次 `connect HOST --force`。`--reset` 清除已触发的崩溃循环保护。参见[让隧道自行保持连接](#让隧道自行保持连接-实验性)。 |
 
 **在本地机器上：守护进程和本机安装**
 
@@ -380,6 +400,7 @@ Notifications
 | `cc-clip install` | 安装 shim；`connect` 会在远程运行它。 |
 | `cc-clip plugin run NAME` | 各代理调用的通知 hook（`claude-notify`、`codex-notify`、`opencode-notify`、`agy-notify`、`cursor-notify`）。 |
 | `cc-clip x11-bridge` | 通过 Xvfb 向 Codex 提供剪贴板；由 `connect --codex` 启动。 |
+| `cc-clip tunnel probe-identity` | 在远程回应托管隧道的身份检查；由 `tunnel run` 调用。 |
 
 ### 配置
 
