@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -65,12 +66,26 @@ func (a detectInstallAdapter) run(session shim.RemoteExecutor, port int, targets
 		return adapterOutcome{attempted: true}
 	}
 	fmt.Printf("  [%s] %s detected, configuring notify integration...\n", a.step, a.label)
-	if err := a.install(session, port); err != nil {
-		log.Printf("      warning: %s notify setup failed: %v", a.label, err)
+	return installOutcome(a.label, a.fileNote, a.install(session, port))
+}
+
+// installOutcome turns an adapter installer's result into the progress line and
+// outcome. A cc-clip notify line that already sits outside the managed block
+// works (doctor reports it as a pass), so it counts as wired with an adopt
+// hint rather than as a failure; any other error stays a warning.
+func installOutcome(label, fileNote string, err error) adapterOutcome {
+	var wired *shim.UnmanagedNotifyError
+	switch {
+	case err == nil:
+		fmt.Printf("      %s\n", fileNote)
+		return adapterOutcome{attempted: true, installed: true}
+	case errors.As(err, &wired):
+		fmt.Printf("      %s\n", wired.Note)
+		return adapterOutcome{attempted: true, installed: true}
+	default:
+		log.Printf("      warning: %s notify setup failed: %v", label, err)
 		return adapterOutcome{attempted: true}
 	}
-	fmt.Printf("      %s\n", a.fileNote)
-	return adapterOutcome{attempted: true, installed: true}
 }
 
 // buildNotifyAdapters returns the ordered detect-install notify adapter table.

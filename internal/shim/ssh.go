@@ -536,11 +536,22 @@ stripped=$(sed '/^%[1]s$/,/^%[2]s$/d' "$config" | sed '/./,$!d')
 # whitespace and ignores it, so "  [agents.X]" is still a valid
 # header. Match it symmetrically with [[:space:]]* to avoid
 # misclassifying indented sub-tables.
-if printf '%%s\n' "$stripped" | awk '
+#
+# awk exits 1 for no top-level notify, 0 for a foreign one, and 2 when the
+# line already invokes cc-clip (the same 'cc-clip' substring doctor's probe
+# matches).
+rc=0
+printf '%%s\n' "$stripped" | awk '
   /^[[:space:]]*\[/ { in_section = 1; next }
-  in_section == 0 && /^[[:space:]]*(notify|"notify"|'"'"'notify'"'"')[[:space:]]*=/ { found = 1 }
-  END { exit !found }
-'; then
+  in_section == 0 && /^[[:space:]]*(notify|"notify"|'"'"'notify'"'"')[[:space:]]*=/ { found = 1; if ($0 ~ /cc-clip/) ours = 1 }
+  END { if (!found) exit 1; if (ours) exit 2; exit 0 }
+' || rc=$?
+if [ "$rc" = 2 ]; then
+  # Already wired by a hand-added or older cc-clip line: leave it untouched.
+  echo '%[4]s'
+  exit 0
+fi
+if [ "$rc" = 0 ]; then
   # Fold the refusal reason to stdout (2>&1) so it survives RemoteExecutor.Exec,
   # which captures only stdout. Without this the caller sees a bare "exit status 7".
   { echo "existing top-level notify setting found in $config -- refusing to inject duplicate. Remove or comment out the top-level notify line first ([agents.X].notify is fine)" >&2; } 2>&1
@@ -565,15 +576,39 @@ fi
 
 mv "$tmp" "$config"
 trap - EXIT
-`, sedEscape(markerStart), sedEscape(markerEnd), managedBlock)
+`, sedEscape(markerStart), sedEscape(markerEnd), managedBlock, codexNotifyUnmanagedMarker)
 
-	if out, err := session.Exec(script); err != nil {
+	out, err := session.Exec(script)
+	return codexNotifyInjectResult(out, err)
+}
+
+// codexNotifyUnmanagedMarker is printed by the injection script when the
+// top-level notify already invokes cc-clip outside the managed block.
+const codexNotifyUnmanagedMarker = "cc-clip-codex-notify:unmanaged-cc-clip"
+
+// UnmanagedNotifyError reports a notify setting that already invokes cc-clip
+// outside the managed block. It works, so callers record the adapter as wired
+// and print Note instead of a failure; doctor reports the same configuration
+// as a pass.
+type UnmanagedNotifyError struct{ Note string }
+
+func (e *UnmanagedNotifyError) Error() string { return e.Note }
+
+// codexNotifyInjectResult maps the injection script's outcome: nil when the
+// managed block was written, *UnmanagedNotifyError when a cc-clip notify line
+// was already there (left untouched), and a failure otherwise, including the
+// refusal for a foreign top-level notify.
+func codexNotifyInjectResult(out string, err error) error {
+	if err != nil {
 		if reason := strings.TrimSpace(out); reason != "" {
 			return fmt.Errorf("failed to inject notify config into ~/.codex/config.toml: %s: %w", reason, err)
 		}
 		return fmt.Errorf("failed to inject notify config into ~/.codex/config.toml: %w", err)
 	}
-
+	if strings.Contains(out, codexNotifyUnmanagedMarker) {
+		return &UnmanagedNotifyError{Note: "an unmanaged cc-clip notify line is already configured in ~/.codex/config.toml " +
+			"(functional; remove it and re-run 'cc-clip connect <host> --codex' to adopt the managed block)"}
+	}
 	return nil
 }
 

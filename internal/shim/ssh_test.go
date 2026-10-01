@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -461,6 +462,65 @@ func TestEnsureRemoteCodexNotifyConfigRefusesUserNotify(t *testing.T) {
 	// error. Otherwise the user sees only an opaque "exit status 7".
 	if !strings.Contains(err.Error(), "existing top-level notify setting found") {
 		t.Fatalf("error must carry the refusal reason, got: %v", err)
+	}
+}
+
+// TestEnsureRemoteCodexNotifyConfigLeavesUnmanagedCCClipLine pins that a
+// hand-added or older top-level notify line that already invokes cc-clip is
+// reported as wired (UnmanagedNotifyError), not as a failed injection, and is
+// left byte-for-byte untouched. doctor reports the same config as a pass.
+func TestEnsureRemoteCodexNotifyConfigLeavesUnmanagedCCClipLine(t *testing.T) {
+	s := &localSession{home: t.TempDir()}
+	const original = "model = \"gpt-5\"\nnotify = [\"cc-clip\", \"notify\", \"--from-codex\"]\n"
+	writeTestCodexConfig(t, s.home, original)
+
+	err := EnsureRemoteCodexNotifyConfig(s, 18339)
+	var wired *UnmanagedNotifyError
+	if !errors.As(err, &wired) {
+		t.Fatalf("an existing cc-clip notify line must be reported as wired, got: %v", err)
+	}
+	if !strings.Contains(wired.Note, "adopt the managed block") {
+		t.Fatalf("note must carry the adopt hint, got: %q", wired.Note)
+	}
+	if got := readTestCodexConfig(t, s.home); got != original {
+		t.Fatalf("config must be left untouched:\n%s", got)
+	}
+}
+
+func TestCodexNotifyInjectResult(t *testing.T) {
+	refusal := "existing top-level notify setting found in /h/.codex/config.toml -- refusing to inject duplicate."
+	tests := []struct {
+		name        string
+		out         string
+		err         error
+		wantNil     bool
+		wantWired   bool
+		wantContain string
+	}{
+		{name: "managed block written", out: "", err: nil, wantNil: true},
+		{name: "cc-clip line already present", out: codexNotifyUnmanagedMarker + "\n", err: nil, wantWired: true},
+		{name: "foreign notify refused", out: refusal, err: errors.New("exit status 7"), wantContain: "refusing to inject duplicate"},
+		{name: "script failure without reason", out: "", err: errors.New("exit status 1"), wantContain: "exit status 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := codexNotifyInjectResult(tt.out, tt.err)
+			var wired *UnmanagedNotifyError
+			switch {
+			case tt.wantNil:
+				if got != nil {
+					t.Fatalf("got %v, want nil", got)
+				}
+			case tt.wantWired:
+				if !errors.As(got, &wired) {
+					t.Fatalf("got %v, want *UnmanagedNotifyError", got)
+				}
+			default:
+				if got == nil || errors.As(got, &wired) || !strings.Contains(got.Error(), tt.wantContain) {
+					t.Fatalf("got %v, want a failure containing %q", got, tt.wantContain)
+				}
+			}
+		})
 	}
 }
 
