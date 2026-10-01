@@ -103,7 +103,7 @@ func RunRemote(host string, port int) []CheckResult {
 	out, err = remoteExecNoForward(host, claudeHooksProbeCommand(port))
 	results = append(results, classifyClaudeHooksCheck(out, err))
 	out, err = remoteExecNoForward(host, codexNotifyProbeCommand)
-	results = append(results, classifyCodexNotifyCheck(out, err))
+	results = append(results, classifyCodexNotifyCheck(out, err, port))
 
 	// End-to-end image round-trip (only if tunnel is up)
 	if tunnelOK(results) {

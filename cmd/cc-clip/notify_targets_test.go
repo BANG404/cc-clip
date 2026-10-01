@@ -488,3 +488,26 @@ func TestBuildNotifyAdaptersCursorRow(t *testing.T) {
 		t.Error("cursor-notify row must carry both a detector and an installer")
 	}
 }
+
+// TestInstallOutcome pins how an adapter installer's result is recorded: a
+// cc-clip notify line already outside the managed block counts as wired (it
+// works, and doctor reports it as a pass), while a refusal over a foreign
+// notify line stays an unwired failure.
+func TestInstallOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want adapterOutcome
+	}{
+		{"installed", nil, adapterOutcome{attempted: true, installed: true}},
+		{"existing cc-clip line", &shim.UnmanagedNotifyError{Note: "already wired"}, adapterOutcome{attempted: true, installed: true}},
+		{"foreign notify refused", fmt.Errorf("failed to inject notify config: refusing to inject duplicate: exit status 7"), adapterOutcome{attempted: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := installOutcome("Codex", "note", tt.err); got != tt.want {
+				t.Fatalf("installOutcome(%v) = %+v, want %+v", tt.err, got, tt.want)
+			}
+		})
+	}
+}

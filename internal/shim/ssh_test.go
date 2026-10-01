@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -461,6 +462,125 @@ func TestEnsureRemoteCodexNotifyConfigRefusesUserNotify(t *testing.T) {
 	// error. Otherwise the user sees only an opaque "exit status 7".
 	if !strings.Contains(err.Error(), "existing top-level notify setting found") {
 		t.Fatalf("error must carry the refusal reason, got: %v", err)
+	}
+}
+
+// TestEnsureRemoteCodexNotifyConfigLeavesUnmanagedCCClipLine pins that a
+// hand-added or older top-level notify line that already invokes cc-clip is
+// reported as wired (UnmanagedNotifyError), not as a failed injection, and is
+// left byte-for-byte untouched. doctor reports the same config as a pass.
+func TestEnsureRemoteCodexNotifyConfigLeavesUnmanagedCCClipLine(t *testing.T) {
+	const original = "model = \"gpt-5\"\nnotify = [\"cc-clip\", \"notify\", \"--from-codex\"]\n"
+	for _, tt := range []struct {
+		name      string
+		port      int
+		wantWired bool
+	}{
+		{"same port is wired", 18339, true},
+		{"other port is reported, not wired", 18340, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &localSession{home: t.TempDir()}
+			writeTestCodexConfig(t, s.home, original)
+
+			err := EnsureRemoteCodexNotifyConfig(s, tt.port)
+			var wired *UnmanagedNotifyError
+			switch {
+			case tt.wantWired && !errors.As(err, &wired):
+				t.Fatalf("a cc-clip notify line for this port must be reported as wired, got: %v", err)
+			case tt.wantWired && !strings.Contains(wired.Note, "adopt the managed block"):
+				t.Fatalf("note must carry the adopt hint, got: %q", wired.Note)
+			case !tt.wantWired && (err == nil || errors.As(err, &wired) || !strings.Contains(err.Error(), "targets port 18339, not 18340")):
+				t.Fatalf("a cc-clip notify line for another port must fail with the port, got: %v", err)
+			}
+			if got := readTestCodexConfig(t, s.home); got != original {
+				t.Fatalf("config must be left untouched:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestCodexNotifyLineProblem(t *testing.T) {
+	tests := []struct {
+		line        string
+		port        int
+		wantProblem string
+	}{
+		{`notify = ["cc-clip", "notify", "--from-codex"]`, 18339, ""},
+		{`notify = ["cc-clip", "plugin", "run", "codex-notify"]`, 18339, ""},
+		{`"notify" = ["/home/u/.local/bin/cc-clip", "notify", "--from-codex"] # by hand`, 18339, ""},
+		{`notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "plugin", "run", "codex-notify"]`, 18340, ""},
+		{`notify = ["cc-clip", "notify", "--port", "18340", "--from-codex"]`, 18340, ""},
+		{`notify = ['cc-clip', 'notify', '--port=18341', '--from-codex']`, 18341, ""},
+		{`notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify", "--port", "18343", "--from-codex"]`, 18343, ""},
+		{`notify = ["env", "CC_CLIP_PORT=nope", "cc-clip", "notify", "--from-codex"]`, 18339, ""},
+		{`notify = ["env", "CC_CLIP_PORT=70000", "cc-clip", "notify", "--from-codex"]`, 18339, "targets port 70000, not 18339"},
+		{`notify = ["env", "CC_CLIP_PORT=0", "cc-clip", "plugin", "run", "codex-notify"]`, 18339, "targets port 0, not 18339"},
+		{`notify = ["cc-clip", "notify", "--port", "0", "--from-codex"]`, 18339, "targets port 0, not 18339"},
+		{`notify = ["cc-clip", "notify", "--from-codex"]`, 18340, "targets port 18339, not 18340"},
+		{`notify = ["cc-clip", "notify", "--port", "nope", "--from-codex"]`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "notify", "--from-codex", "--port", "18340"]`, 18340, "cannot confirm"},
+		{`notify = ["cc-clip", "notify"]`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "plugin", "run", "codex-notify", "--port", "nope"]`, 18339, "cannot confirm"},
+		{`notify = ["logger", "cc-clip"]`, 18339, "cannot confirm"},
+		{`notify = ["logger", "cc-clip", "notify", "--from-codex"]`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "plugin", "run", "claude-notify"]`, 18339, "cannot confirm"},
+		{`notify = ["sh", "-c", "cc-clip notify --from-codex"]`, 18339, "cannot confirm"},
+		{`notify = ["my-notifier"] # was cc-clip`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "notify", "--from-codex",]`, 18339, ""},
+		{`notify = ["cc-clip" "notify" "--from-codex"]`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "notify", "--from-codex"] trailing`, 18339, "cannot confirm"},
+	}
+	for _, tt := range tests {
+		problem := CodexNotifyLineProblem(tt.line, tt.port)
+		if (tt.wantProblem == "") != (problem == "") || !strings.Contains(problem, tt.wantProblem) {
+			t.Errorf("CodexNotifyLineProblem(%s, %d) = %q, want %q", tt.line, tt.port, problem, tt.wantProblem)
+		}
+	}
+}
+
+func TestCodexNotifyInjectResult(t *testing.T) {
+	refusal := "existing top-level notify setting found in /h/.codex/config.toml -- refusing to inject duplicate."
+	tests := []struct {
+		name        string
+		out         string
+		err         error
+		port        int
+		wantNil     bool
+		wantWired   bool
+		wantContain string
+	}{
+		{name: "managed block written", port: 18339, wantNil: true},
+		{name: "default-port line, default port", out: codexNotifyUnmanagedMarker + `notify = ["cc-clip", "notify", "--from-codex"]` + "\n", port: 18339, wantWired: true},
+		{name: "default-port line, port 18340", out: codexNotifyUnmanagedMarker + `notify = ["cc-clip", "notify", "--from-codex"]` + "\n", port: 18340, wantContain: "targets port 18339, not 18340"},
+		{name: "--port 18340 line, port 18340", out: codexNotifyUnmanagedMarker + `notify = ["cc-clip", "notify", "--port", "18340", "--from-codex"]`, port: 18340, wantWired: true},
+		{name: "--port=18340 line, port 18340", out: codexNotifyUnmanagedMarker + `notify = ["cc-clip", "notify", "--port=18340", "--from-codex"]`, port: 18340, wantWired: true},
+		{name: "CC_CLIP_PORT=18340 line, port 18340", out: codexNotifyUnmanagedMarker + `notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify", "--from-codex"]`, port: 18340, wantWired: true},
+		{name: "CC_CLIP_PORT=18340 line, default port", out: codexNotifyUnmanagedMarker + `notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify", "--from-codex"]`, port: 18339, wantContain: "targets port 18340, not 18339"},
+		{name: "line naming cc-clip as an argument fails", out: codexNotifyUnmanagedMarker + `notify = ["logger", "cc-clip", "notify"]`, port: 18339, wantContain: "cannot confirm"},
+		{name: "invalid --port line is unconfirmed", out: codexNotifyUnmanagedMarker + `notify = ["cc-clip", "notify", "--port", "nope", "--from-codex"]`, port: 18339, wantContain: "cannot confirm"},
+		{name: "foreign notify refused", out: refusal, err: errors.New("exit status 7"), port: 18339, wantContain: "refusing to inject duplicate"},
+		{name: "script failure without reason", err: errors.New("exit status 1"), port: 18339, wantContain: "exit status 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := codexNotifyInjectResult(tt.out, tt.err, tt.port)
+			var wired *UnmanagedNotifyError
+			switch {
+			case tt.wantNil:
+				if got != nil {
+					t.Fatalf("got %v, want nil", got)
+				}
+			case tt.wantWired:
+				if !errors.As(got, &wired) {
+					t.Fatalf("got %v, want *UnmanagedNotifyError", got)
+				}
+			default:
+				if got == nil || errors.As(got, &wired) || !strings.Contains(got.Error(), tt.wantContain) {
+					t.Fatalf("got %v, want a failure containing %q", got, tt.wantContain)
+				}
+			}
+		})
 	}
 }
 

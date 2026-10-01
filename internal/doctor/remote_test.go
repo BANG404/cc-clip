@@ -2,6 +2,10 @@ package doctor
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -270,6 +274,34 @@ func TestNotifyBridgeProbeCommands(t *testing.T) {
 	})
 }
 
+// TestCodexNotifyProbeReadsQuotedKeys runs the probe in sh: connect's awk
+// accepts bare, double-quoted and single-quoted notify keys, so doctor must
+// pass each of them on as an unmanaged cc-clip line.
+func TestCodexNotifyProbeReadsQuotedKeys(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the probe runs in the remote's POSIX shell")
+	}
+	for _, key := range []string{`notify`, `"notify"`, `'notify'`} {
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		line := key + ` = ["cc-clip", "notify", "--from-codex"]`
+		if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(line+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-c", codexNotifyProbeCommand)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("probe failed for %s: %v", key, err)
+		}
+		if want := codexUnmanagedProbeMarker + line; strings.TrimSpace(string(out)) != want {
+			t.Errorf("probe for %s = %q, want %q", key, out, want)
+		}
+	}
+}
+
 // TestClassifyClaudeHooksCheck: the venus field case — a bare user-authored
 // cc-clip-hook — must classify as OK (notifications work through the bash
 // fallback) with a migration hint, NOT as a failure.
@@ -320,7 +352,11 @@ func TestClassifyCodexNotifyCheck(t *testing.T) {
 		{"ssh transport failure", "", fmt.Errorf("exit status 255"), false, "could not run over SSH"},
 		{"codex absent is a skip", "codex-notify:no-codex", nil, true, "skipped"},
 		{"managed block", "codex-notify:managed", nil, true, "managed"},
-		{"unmanaged cc-clip line still works", "codex-notify:unmanaged-cc-clip", nil, true, "unmanaged"},
+		{"unmanaged cc-clip line on this port works", `codex-notify:unmanaged-cc-clip:notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify", "--from-codex"]`, nil, true, "functional"},
+		{"unmanaged cc-clip line on another port fails", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "notify", "--port", "18341", "--from-codex"]`, nil, false, "targets port 18341, not 18340"},
+		{"default-port line against a non-default port fails", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "plugin", "run", "codex-notify"]` + "\n", nil, false, "targets port 18339, not 18340"},
+		{"line naming cc-clip as an argument fails", `codex-notify:unmanaged-cc-clip:notify = ["logger", "cc-clip", "notify"]`, nil, false, "cannot confirm"},
+		{"invalid --port line is unconfirmed", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "notify", "--port", "nope", "--from-codex"]`, nil, false, "cannot confirm"},
 		{"foreign notify named but respected", "codex-notify:foreign", nil, true, "non-cc-clip"},
 		{"codex present but unwired", "codex-notify:none", nil, false, "--codex"},
 		{"unrecognized output fails closed", "garbage", nil, false, "did not complete"},
@@ -329,7 +365,7 @@ func TestClassifyCodexNotifyCheck(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := classifyCodexNotifyCheck(tt.out, tt.err)
+			got := classifyCodexNotifyCheck(tt.out, tt.err, 18340)
 			if got.OK != tt.wantOK {
 				t.Fatalf("OK = %v, want %v (msg=%q)", got.OK, tt.wantOK, got.Message)
 			}
@@ -337,6 +373,16 @@ func TestClassifyCodexNotifyCheck(t *testing.T) {
 				t.Fatalf("message %q must contain %q", got.Message, tt.wantContain)
 			}
 		})
+	}
+}
+
+// TestClassifyCodexNotifyCheckDefaultPort: a portless cc-clip line posts to
+// the default port, so it passes for a host on the default port.
+func TestClassifyCodexNotifyCheckDefaultPort(t *testing.T) {
+	t.Parallel()
+	got := classifyCodexNotifyCheck(`codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "notify", "--from-codex"]`, nil, 18339)
+	if !got.OK || !strings.Contains(got.Message, "unmanaged") {
+		t.Fatalf("portless line on the default port must pass, got %+v", got)
 	}
 }
 
