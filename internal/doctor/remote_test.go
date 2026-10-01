@@ -320,7 +320,9 @@ func TestClassifyCodexNotifyCheck(t *testing.T) {
 		{"ssh transport failure", "", fmt.Errorf("exit status 255"), false, "could not run over SSH"},
 		{"codex absent is a skip", "codex-notify:no-codex", nil, true, "skipped"},
 		{"managed block", "codex-notify:managed", nil, true, "managed"},
-		{"unmanaged cc-clip line still works", "codex-notify:unmanaged-cc-clip", nil, true, "unmanaged"},
+		{"unmanaged cc-clip line on this port works", `codex-notify:unmanaged-cc-clip:notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify"]`, nil, true, "functional"},
+		{"unmanaged cc-clip line on another port fails", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "notify", "--port", "18341"]`, nil, false, "targets port 18341, not 18340"},
+		{"default-port line against a non-default port fails", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "plugin", "run", "codex-notify"]` + "\n", nil, false, "targets port 18339, not 18340"},
 		{"foreign notify named but respected", "codex-notify:foreign", nil, true, "non-cc-clip"},
 		{"codex present but unwired", "codex-notify:none", nil, false, "--codex"},
 		{"unrecognized output fails closed", "garbage", nil, false, "did not complete"},
@@ -329,7 +331,7 @@ func TestClassifyCodexNotifyCheck(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := classifyCodexNotifyCheck(tt.out, tt.err)
+			got := classifyCodexNotifyCheck(tt.out, tt.err, 18340)
 			if got.OK != tt.wantOK {
 				t.Fatalf("OK = %v, want %v (msg=%q)", got.OK, tt.wantOK, got.Message)
 			}
@@ -337,6 +339,16 @@ func TestClassifyCodexNotifyCheck(t *testing.T) {
 				t.Fatalf("message %q must contain %q", got.Message, tt.wantContain)
 			}
 		})
+	}
+}
+
+// TestClassifyCodexNotifyCheckDefaultPort: a portless cc-clip line posts to
+// the default port, so it passes for a host on the default port.
+func TestClassifyCodexNotifyCheckDefaultPort(t *testing.T) {
+	t.Parallel()
+	got := classifyCodexNotifyCheck(`codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "notify", "--from-codex"]`, nil, 18339)
+	if !got.OK || !strings.Contains(got.Message, "unmanaged") {
+		t.Fatalf("portless line on the default port must pass, got %+v", got)
 	}
 }
 

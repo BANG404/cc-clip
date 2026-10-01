@@ -3,11 +3,14 @@ package shim
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -539,16 +542,17 @@ stripped=$(sed '/^%[1]s$/,/^%[2]s$/d' "$config" | sed '/./,$!d')
 #
 # awk exits 1 for no top-level notify, 0 for a foreign one, and 2 when the
 # line already invokes cc-clip (the same 'cc-clip' substring doctor's probe
-# matches).
+# matches); in that case it prints the line so Go can check its port.
 rc=0
-printf '%%s\n' "$stripped" | awk '
+line=$(printf '%%s\n' "$stripped" | awk '
   /^[[:space:]]*\[/ { in_section = 1; next }
-  in_section == 0 && /^[[:space:]]*(notify|"notify"|'"'"'notify'"'"')[[:space:]]*=/ { found = 1; if ($0 ~ /cc-clip/) ours = 1 }
-  END { if (!found) exit 1; if (ours) exit 2; exit 0 }
-' || rc=$?
+  in_section == 0 && /^[[:space:]]*(notify|"notify"|'"'"'notify'"'"')[[:space:]]*=/ { found = 1; if ($0 ~ /cc-clip/) { ours = 1; l = $0 } }
+  END { if (!found) exit 1; if (ours) { print l; exit 2 }; exit 0 }
+') || rc=$?
 if [ "$rc" = 2 ]; then
-  # Already wired by a hand-added or older cc-clip line: leave it untouched.
-  echo '%[4]s'
+  # A hand-added or older cc-clip line: never touch it. Go decides whether
+  # its port matches (CodexNotifyLinePort).
+  printf '%%s%%s\n' '%[4]s' "$line"
   exit 0
 fi
 if [ "$rc" = 0 ]; then
@@ -579,37 +583,90 @@ trap - EXIT
 `, sedEscape(markerStart), sedEscape(markerEnd), managedBlock, codexNotifyUnmanagedMarker)
 
 	out, err := session.Exec(script)
-	return codexNotifyInjectResult(out, err)
+	return codexNotifyInjectResult(out, err, port)
 }
 
-// codexNotifyUnmanagedMarker is printed by the injection script when the
-// top-level notify already invokes cc-clip outside the managed block.
-const codexNotifyUnmanagedMarker = "cc-clip-codex-notify:unmanaged-cc-clip"
+// codexNotifyUnmanagedMarker prefixes the line the injection script prints
+// when the top-level notify already invokes cc-clip outside the managed block.
+const codexNotifyUnmanagedMarker = "cc-clip-codex-notify:unmanaged-cc-clip:"
 
 // UnmanagedNotifyError reports a notify setting that already invokes cc-clip
-// outside the managed block. It works, so callers record the adapter as wired
-// and print Note instead of a failure; doctor reports the same configuration
-// as a pass.
+// outside the managed block and targets the requested port. It works, so
+// callers record the adapter as wired and print Note instead of a failure;
+// doctor reports the same configuration as a pass.
 type UnmanagedNotifyError struct{ Note string }
 
 func (e *UnmanagedNotifyError) Error() string { return e.Note }
 
 // codexNotifyInjectResult maps the injection script's outcome: nil when the
 // managed block was written, *UnmanagedNotifyError when a cc-clip notify line
-// was already there (left untouched), and a failure otherwise, including the
-// refusal for a foreign top-level notify.
-func codexNotifyInjectResult(out string, err error) error {
+// for this port was already there (left untouched), and a failure otherwise:
+// a cc-clip line for another port, or the refusal for a foreign notify.
+func codexNotifyInjectResult(out string, err error, port int) error {
 	if err != nil {
 		if reason := strings.TrimSpace(out); reason != "" {
 			return fmt.Errorf("failed to inject notify config into ~/.codex/config.toml: %s: %w", reason, err)
 		}
 		return fmt.Errorf("failed to inject notify config into ~/.codex/config.toml: %w", err)
 	}
-	if strings.Contains(out, codexNotifyUnmanagedMarker) {
-		return &UnmanagedNotifyError{Note: "an unmanaged cc-clip notify line is already configured in ~/.codex/config.toml " +
-			"(functional; remove it and re-run 'cc-clip connect <host> --codex' to adopt the managed block)"}
+	i := strings.Index(out, codexNotifyUnmanagedMarker)
+	if i < 0 {
+		return nil
 	}
-	return nil
+	line := strings.SplitN(out[i+len(codexNotifyUnmanagedMarker):], "\n", 2)[0]
+	if linePort := CodexNotifyLinePort(line); linePort != port {
+		return errors.New(CodexNotifyPortMismatch(linePort, port))
+	}
+	return &UnmanagedNotifyError{Note: "an unmanaged cc-clip notify line is already configured in ~/.codex/config.toml " +
+		"(functional; remove it and re-run 'cc-clip connect <host> --codex' to adopt the managed block)"}
+}
+
+// CodexNotifyLinePort returns the daemon port an unmanaged cc-clip notify
+// line posts to. It reads the same forms cc-clip itself honours: a
+// CC_CLIP_PORT=N element (the managed block's form), overridden by a --port N
+// or --port=N flag, as getPort does at runtime. Elements are TOML strings,
+// and an element such as "cc-clip notify --port 18340" passed to a shell is
+// split into words too. Without either, the line uses defaultDaemonPort.
+func CodexNotifyLinePort(line string) int {
+	var words []string
+	for _, m := range tomlStringElement.FindAllStringSubmatch(line, -1) {
+		words = append(words, strings.Fields(m[1]+m[2])...)
+	}
+	env, flag := 0, 0
+	for i, w := range words {
+		switch {
+		case strings.HasPrefix(w, "CC_CLIP_PORT="):
+			env = parsePort(strings.TrimPrefix(w, "CC_CLIP_PORT="), env)
+		case strings.HasPrefix(w, "--port="):
+			flag = parsePort(strings.TrimPrefix(w, "--port="), flag)
+		case w == "--port" && i+1 < len(words):
+			flag = parsePort(words[i+1], flag)
+		}
+	}
+	switch {
+	case flag != 0:
+		return flag
+	case env != 0:
+		return env
+	default:
+		return defaultDaemonPort
+	}
+}
+
+// CodexNotifyPortMismatch is the shared connect and doctor wording for an
+// unmanaged cc-clip notify line that posts to a different daemon port.
+func CodexNotifyPortMismatch(linePort, port int) string {
+	return fmt.Sprintf("an unmanaged cc-clip notify line in ~/.codex/config.toml targets port %d, not %d; "+
+		"remove it and re-run 'cc-clip connect <host> --codex'", linePort, port)
+}
+
+var tomlStringElement = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"|'([^']*)'`)
+
+func parsePort(s string, fallback int) int {
+	if p, err := strconv.Atoi(s); err == nil && p > 0 && p < 65536 {
+		return p
+	}
+	return fallback
 }
 
 // StripRemoteCodexNotifyConfig removes the cc-clip managed notify block
