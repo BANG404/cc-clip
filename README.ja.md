@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md @ ece56f51cdfa23c37c4f7eccad92c97f16fb306d -->
+<!-- i18n-source: README.md @ cb54b21c535ed03bd3d0a62a3b48a966637d2d9f -->
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -261,7 +261,8 @@ Windows サポートは引き続き実験的です。まずは [Windows クイ�
   り、不安定な回線でクライアントが消えてもリモート側がポートを保持し続けたりすると、その
   セッションを見つけて終了するまで貼り付けが使えなくなります
   （[トラブルシューティング](docs/troubleshooting.md#stale-sshd-process-blocks-remoteforward)を参照してください）。
-- **使い方:** ホストごとに一度デプロイし、あとはターミナルで動かしたままにしてください。
+- **使い方:** ローカルマシン（`cc-clip serve` を動かしているマシン。リモートではありません）で、
+  ホストごとに一度デプロイし、あとはターミナルで動かしたままにしてください。
 
   ```bash
   cc-clip connect myserver --force   # supervisor が確認するヘルパーをデプロイ
@@ -269,9 +270,12 @@ Windows サポートは引き続き実験的です。まずは [Windows クイ�
   ```
 
 - **結果:** `managed tunnel state: healthy` のようなタイムスタンプ付きの行が表示され、再接続や
-  待機のたびに新しい状態が出力されます。SSH の設定は変更しないため、対話的な `ssh myserver`
-  も同じポートを要求します。そちらが先にポートを取った場合、supervisor は `port-conflict` を
-  報告して待機します。`--use-remote-bin` で設定したホストはまだサポートしていません。また、
+  待機のたびに新しい状態が出力されます。誤ってリモートで実行すると、`identity-mismatch` で停止し
+  理由を表示します。SSH の設定は変更しないため、すべての `ssh myserver` が同じポートを要求します。
+  ほかのツールが保持しているバックグラウンド接続も同様です。先にポートを取った接続が保持し、
+  supervisor は `port-conflict` を報告して待機します。試している間 supervisor にポートを持たせる
+  には、`~/.ssh/config` の `Host myserver` にある `RemoteForward` の行をコメントアウトし、終わったら
+  元に戻してください。`--use-remote-bin` で設定したホストはまだサポートしていません。また、
   supervisor の実行中は token が期限切れになりません。
 
 ### ホストから cc-clip を削除する
@@ -372,7 +376,7 @@ adapter の詳細、手動設定、nonce 登録、診断については、
 | `cc-clip hosts forget HOST` | その一覧からホストを削除します。リモートには触れません。 |
 | `cc-clip uninstall --host HOST` | ホストから管理対象の Claude フックと PATH marker を削除します。先にホスト上で `cc-clip uninstall` を実行してください。[cc-clip の削除](#ホストから-cc-clip-を削除する)を参照してください。 |
 | `cc-clip uninstall --codex --host HOST` | ホストから Codex サポートを削除します。ブリッジと Xvfb を停止し、Codex の `notify` エントリとディスプレイ設定を取り除きます。 |
-| `cc-clip tunnel run HOST` | **実験的。**最初にポートを取った `ssh` セッションに頼らず、専用の SSH 接続でホストの貼り付け用トンネルを保持し、再接続します。Ctrl-C までフォアグラウンドで動きます。先に一度 `connect HOST --force` を実行してください。`--reset` で作動したクラッシュループ保護を解除します。[トンネルを単独で維持する](#トンネルを単独で維持する-実験的)を参照してください。 |
+| `cc-clip tunnel run HOST` | **実験的。**最初にポートを取った `ssh` セッションに頼らず、専用の SSH 接続でホストの貼り付け用トンネルを保持し、再接続します。リモートではなく、このマシンで実行してください。Ctrl-C までフォアグラウンドで動きます。先に一度 `connect HOST --force` を実行してください。`--reset` で作動したクラッシュループ保護を解除します。[トンネルを単独で維持する](#トンネルを単独で維持する-実験的)を参照してください。 |
 
 **ローカルマシンで: デーモンと自分のインストール**
 

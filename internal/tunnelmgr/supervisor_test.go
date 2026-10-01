@@ -232,8 +232,11 @@ func TestSupervisorLocalIdentityFailuresRemainDistinct(t *testing.T) {
 	sup.FetchLocalIdentity = func(string, string, time.Duration) (tunnel.IdentityInfo, error) {
 		return tunnel.IdentityInfo{Service: "cc-clip", Status: "ok", ProtocolVersion: 1, InstanceID: "other-instance"}, nil
 	}
-	if ready, state, _ := sup.localReady(); ready || state != StateIdentityMismatch {
+	if ready, state, reason := sup.localReady(); ready || state != StateIdentityMismatch {
 		t.Fatalf("local identity mismatch = ready %v, state %q; want identity-mismatch", ready, state)
+	} else if !strings.Contains(reason, "on your local machine") || !strings.Contains(reason, "not on the remote host") {
+		// #182: run on the remote host, this is the error users see.
+		t.Fatalf("local identity mismatch must say where to run tunnel run, got %q", reason)
 	}
 
 	sup.FetchLocalIdentity = func(string, string, time.Duration) (tunnel.IdentityInfo, error) {
