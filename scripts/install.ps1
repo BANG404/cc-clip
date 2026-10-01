@@ -22,12 +22,48 @@ function Get-CcClipArch {
     }
 }
 
-function Get-LatestVersion {
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{ "User-Agent" = "cc-clip-installer" }
-    if (-not $release.tag_name) {
-        throw "Could not determine latest cc-clip version"
+# The API answer is preferred; when it fails (the unauthenticated limit is 60
+# requests/hour per public IP, shared by everyone behind a NAT, #170) the tag
+# is read from the github.com releases/latest redirect, which is not
+# API-rate-limited and never points at a draft or prerelease.
+function Get-LatestVersionFromRedirect {
+    # HttpWebRequest with AllowAutoRedirect disabled returns the 3xx response
+    # itself on Windows PowerShell 5.1 and PowerShell 7 alike.
+    $request = [System.Net.HttpWebRequest]::Create("https://github.com/$Repo/releases/latest")
+    $request.AllowAutoRedirect = $false
+    $request.UserAgent = "cc-clip-installer"
+    $response = $request.GetResponse()
+    try {
+        $location = $response.Headers["Location"]
+    } finally {
+        $response.Close()
     }
-    return [string]$release.tag_name
+    if ($location -match '/releases/tag/([^/?#]+)') {
+        return [Uri]::UnescapeDataString($Matches[1])
+    }
+    throw "redirect does not name a release tag: $location"
+}
+
+function Get-LatestVersion {
+    $apiError = ""
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{ "User-Agent" = "cc-clip-installer" }
+        if ($release.tag_name) {
+            return [string]$release.tag_name
+        }
+        $apiError = "GitHub API returned no tag_name"
+    } catch {
+        $apiError = $_.Exception.Message
+    }
+    try {
+        return Get-LatestVersionFromRedirect
+    } catch {
+        $pin = '$env:CC_CLIP_VERSION = "vX.Y.Z"; irm https://raw.githubusercontent.com/' + $Repo + '/main/scripts/install.ps1 | iex'
+        throw ("Could not determine latest cc-clip version: GitHub API failed ($apiError); " +
+            "the releases/latest redirect also failed ($($_.Exception.Message)).`n" +
+            "GitHub may be rate-limiting this network (60 API requests/hour per public IP).`n" +
+            "Pin a version from https://github.com/$Repo/releases instead, e.g.:`n  $pin")
+    }
 }
 
 function Resolve-Version {
