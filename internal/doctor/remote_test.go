@@ -366,11 +366,19 @@ func TestClassifyNotifyPresenceChecks(t *testing.T) {
 // must not ride an existing ControlMaster, which may own the RemoteForward and
 // would make doctor's own session the holder it labels "not the holder".
 func TestRemoteNoForwardArgsNeverReuseAMaster(t *testing.T) {
-	args := strings.Join(remoteNoForwardArgs("venus", "echo ok"), " ")
+	args := strings.Join(remoteNoForwardArgsFor("linux", "venus", "echo ok"), " ")
 	for _, want := range []string{"ClearAllForwardings=yes", "ControlMaster=no", "ControlPath=none", "-- venus"} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("doctor ssh args lack %q: %s", want, args)
 		}
+	}
+
+	winArgs := strings.Join(remoteNoForwardArgsFor("windows", "venus", "echo ok"), " ")
+	if !strings.Contains(winArgs, "ClearAllForwardings=yes") || !strings.Contains(winArgs, "-- venus") {
+		t.Fatalf("windows doctor ssh args lack the forwarding guard: %s", winArgs)
+	}
+	if strings.Contains(winArgs, "Control") {
+		t.Fatalf("windows doctor ssh args must not carry multiplexing options: %s", winArgs)
 	}
 }
 

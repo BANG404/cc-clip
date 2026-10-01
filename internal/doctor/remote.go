@@ -3,6 +3,7 @@ package doctor
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/shunmei/cc-clip/internal/shim"
@@ -186,12 +187,18 @@ printf '%s\n' "$("$bin" version) ($bin)"`
 // that already owns the forward would make doctor's own session the port
 // holder it reports on (review of #176).
 func remoteNoForwardArgs(host, cmdStr string) []string {
-	return []string{
-		"-o", "ClearAllForwardings=yes",
-		"-o", "ControlMaster=no",
-		"-o", "ControlPath=none",
-		"--", host, shim.WrapRemoteShell(cmdStr),
+	return remoteNoForwardArgsFor(runtime.GOOS, host, cmdStr)
+}
+
+// remoteNoForwardArgsFor leaves the multiplexing options out on Windows, where
+// OpenSSH has no master to reuse (NewSSHSession never starts one there), so
+// they would only add an untested option to every probe (review of #186).
+func remoteNoForwardArgsFor(goos, host, cmdStr string) []string {
+	args := []string{"-o", "ClearAllForwardings=yes"}
+	if goos != "windows" {
+		args = append(args, "-o", "ControlMaster=no", "-o", "ControlPath=none")
 	}
+	return append(args, "--", host, shim.WrapRemoteShell(cmdStr))
 }
 
 func remoteExecNoForward(host string, args ...string) (string, error) {
