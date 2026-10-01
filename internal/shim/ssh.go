@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -624,50 +625,66 @@ func codexNotifyInjectResult(out string, err error, port int) error {
 
 // CodexNotifyLineProblem judges an unmanaged top-level notify line that
 // mentions cc-clip, for connect and doctor alike. Codex runs the array as an
-// argv, without a shell, so the line counts as wired only when argv[0] is
-// cc-clip (bare, by path, or after env VAR=VALUE ...) running notify or
-// plugin run codex-notify, on port. It returns "" then, and otherwise why the
-// line is not counted; other forms, shell wrappers included, are reported as
-// unconfirmed rather than interpreted.
+// argv, without a shell, and appends its JSON payload as the last argument.
+// The line counts as wired only in the exact shapes cc-clip has used, which
+// hand that payload to cc-clip:
+//
+//	[env VAR=VALUE ...] cc-clip notify [--port N | --port=N] --from-codex
+//	[env VAR=VALUE ...] cc-clip plugin run codex-notify
+//
+// with cc-clip bare or by path, and only on port. It returns "" then, and
+// otherwise why the line is not counted. Any other shape, shell wrappers
+// included, is reported as unconfirmed rather than interpreted.
 func CodexNotifyLineProblem(line string, port int) string {
 	argv, ok := codexNotifyArgv(line)
 	if !ok {
 		return codexNotifyUnconfirmed
 	}
-	envPort, rest := 0, argv
+	linePort, rest := defaultDaemonPort, argv
 	if len(rest) > 0 && (rest[0] == "env" || strings.HasSuffix(rest[0], "/env")) {
 		rest = rest[1:]
 		for len(rest) > 0 && strings.Contains(rest[0], "=") && !strings.HasPrefix(rest[0], "-") {
 			if v, isPort := strings.CutPrefix(rest[0], "CC_CLIP_PORT="); isPort {
-				// getPort takes any value strconv.Atoi accepts and ignores the rest.
+				// getPort takes any value strconv.Atoi accepts, 0 included,
+				// and ignores the rest.
 				if p, err := strconv.Atoi(v); err == nil {
-					envPort = p
+					linePort = p
 				}
 			}
 			rest = rest[1:]
 		}
 	}
-	if len(rest) < 2 || (rest[0] != "cc-clip" && !strings.HasSuffix(rest[0], "/cc-clip")) {
+	if len(rest) == 0 || (rest[0] != "cc-clip" && !strings.HasSuffix(rest[0], "/cc-clip")) {
 		return codexNotifyUnconfirmed
 	}
 	args := rest[1:]
-	if args[0] != "notify" && !(len(args) >= 3 && args[0] == "plugin" && args[1] == "run" && args[2] == "codex-notify") {
-		return codexNotifyUnconfirmed
-	}
-	linePort, badFlag := codexNotifyFlagPort(args)
-	switch {
-	case badFlag != "":
-		return fmt.Sprintf("an unmanaged cc-clip notify line in ~/.codex/config.toml passes an invalid --port %q, "+
-			"so cc-clip exits without sending; remove it and re-run 'cc-clip connect <host> --codex'", badFlag)
-	case linePort == 0 && envPort != 0:
-		linePort = envPort
-	case linePort == 0:
-		linePort = defaultDaemonPort
+	if !slices.Equal(args, []string{"plugin", "run", "codex-notify"}) && !slices.Equal(args, []string{"notify", "--from-codex"}) {
+		flagPort, ok := codexNotifyPortFlag(args)
+		if !ok {
+			return codexNotifyUnconfirmed
+		}
+		linePort = flagPort
 	}
 	if linePort != port {
 		return CodexNotifyPortMismatch(linePort, port)
 	}
 	return ""
+}
+
+// codexNotifyPortFlag matches notify --port N --from-codex and
+// notify --port=N --from-codex, returning N when strconv.Atoi accepts it.
+func codexNotifyPortFlag(args []string) (port int, ok bool) {
+	var value string
+	switch {
+	case len(args) == 4 && args[0] == "notify" && args[1] == "--port" && args[3] == "--from-codex":
+		value = args[2]
+	case len(args) == 3 && args[0] == "notify" && strings.HasPrefix(args[1], "--port=") && args[2] == "--from-codex":
+		value = strings.TrimPrefix(args[1], "--port=")
+	default:
+		return 0, false
+	}
+	p, err := strconv.Atoi(value)
+	return p, err == nil
 }
 
 const codexNotifyUnconfirmed = "a top-level notify line in ~/.codex/config.toml mentions cc-clip but is not a direct " +
@@ -709,27 +726,6 @@ func codexNotifyArgv(line string) (argv []string, ok bool) {
 		argv = append(argv, elem)
 		rest = rest[m[1]:]
 	}
-}
-
-// codexNotifyFlagPort returns the --port N or --port=N value the cc-clip
-// arguments pass, 0 when there is none, and badFlag when strconv.Atoi rejects
-// it, since cc-clip notify exits on such a value.
-func codexNotifyFlagPort(args []string) (port int, badFlag string) {
-	for i, a := range args {
-		value, isFlag := strings.CutPrefix(a, "--port=")
-		if a == "--port" && i+1 < len(args) {
-			value, isFlag = args[i+1], true
-		}
-		if !isFlag {
-			continue
-		}
-		p, err := strconv.Atoi(value)
-		if err != nil {
-			return 0, value
-		}
-		port = p
-	}
-	return port, ""
 }
 
 // CodexNotifyPortMismatch is the shared connect and doctor wording for an
