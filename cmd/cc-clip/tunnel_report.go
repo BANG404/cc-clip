@@ -28,7 +28,9 @@ func tunnelVerificationReport(state tunnel.RemoteTunnelState, port int, host str
 			"      The port being open does NOT mean the tunnel works. Two known causes:",
 			"        1. A stale sshd from a previous SSH session still owns the forward.",
 		}
-		lines = append(lines, tunnel.StaleForwardGuidance(host, port, sessions, "           ")...)
+		// connect lists over its own ControlMaster, created with
+		// ClearAllForwardings, so its sshd never holds the forward.
+		lines = append(lines, tunnel.StaleForwardGuidance(host, port, sessions, true, "           ")...)
 		return append(lines,
 			"        2. The forward is live but the local daemon is not running.",
 			"           On this machine, start it: cc-clip serve",

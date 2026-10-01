@@ -36,7 +36,7 @@ func TestParseSSHDSessions(t *testing.T) {
 }
 
 func TestStaleForwardGuidanceWithoutSessions(t *testing.T) {
-	got := strings.Join(StaleForwardGuidance("venus", 18339, nil, ""), "\n")
+	got := strings.Join(StaleForwardGuidance("venus", 18339, nil, true, ""), "\n")
 	for _, want := range []string{"could not be listed", "ssh -o ClearAllForwardings=yes venus 'kill <PID>'"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("guidance lacks %q:\n%s", want, got)
@@ -44,6 +44,34 @@ func TestStaleForwardGuidanceWithoutSessions(t *testing.T) {
 	}
 	if strings.Contains(got, "start time unknown") {
 		t.Fatalf("no session rows expected:\n%s", got)
+	}
+}
+
+// TestStaleForwardGuidanceSelfLabel pins the review of #176: the session the
+// listing ran under is called "not the holder" only when the caller vouches
+// that its connection could not have reused a master that owns the forward.
+func TestStaleForwardGuidanceSelfLabel(t *testing.T) {
+	sessions := []SSHDSession{
+		{PID: 11, Started: "Wed Sep 30 21:24:10 2026", Title: "sshd: alice@notty"},
+		{PID: 22, Started: "Wed Sep 30 21:26:18 2026", Title: "sshd: alice@notty", Current: true},
+	}
+	independent := strings.Join(StaleForwardGuidance("venus", 18339, sessions, true, ""), "\n")
+	if !strings.Contains(independent, "PID 22") || !strings.Contains(independent, "(this check; not the holder)") {
+		t.Fatalf("independent connection must rule itself out:\n%s", independent)
+	}
+	reused := strings.Join(StaleForwardGuidance("venus", 18339, sessions, false, ""), "\n")
+	if strings.Contains(reused, "not the holder") || !strings.Contains(reused, "(this check)") {
+		t.Fatalf("a possibly reused connection must not rule itself out:\n%s", reused)
+	}
+}
+
+// TestStaleForwardGuidanceSparesOtherComputers pins the review of #176: a
+// session opened from another workstation has no client on this machine, so
+// the guidance must not treat "no local client" alone as stale.
+func TestStaleForwardGuidanceSparesOtherComputers(t *testing.T) {
+	got := strings.Join(StaleForwardGuidance("venus", 18339, nil, true, ""), "\n")
+	if !strings.Contains(got, "from another computer") {
+		t.Fatalf("guidance must warn about sessions from other computers:\n%s", got)
 	}
 }
 

@@ -132,7 +132,9 @@ func classifyTunnelCheck(out string, err error, port int) CheckResult {
 // withStaleForwardGuidance appends the user's remote sshd sessions and the
 // unprivileged way to end the one holding the port to a stale tunnel result.
 func withStaleForwardGuidance(r CheckResult, host string, port int, sessionsOut string) CheckResult {
-	guidance := tunnel.StaleForwardGuidance(host, port, tunnel.ParseSSHDSessions(sessionsOut), "      ")
+	// remoteNoForwardArgs never multiplexes, so doctor's own sshd cannot be the
+	// session that holds the forward.
+	guidance := tunnel.StaleForwardGuidance(host, port, tunnel.ParseSSHDSessions(sessionsOut), true, "      ")
 	r.Message += "\n" + strings.Join(guidance, "\n")
 	return r
 }
@@ -178,9 +180,23 @@ printf '%s\n' "$("$bin" version) ($bin)"`
 
 // remoteExecNoForward runs an SSH command without applying RemoteForward from ssh config.
 // Doctor checks should inspect the existing tunnel, not compete with it by opening a new one.
+// remoteNoForwardArgs builds doctor's ssh argv. ClearAllForwardings keeps the
+// user's RemoteForward from being requested, and ControlMaster=no with
+// ControlPath=none keeps ssh from reusing an existing master: a reused master
+// that already owns the forward would make doctor's own session the port
+// holder it reports on (review of #176).
+func remoteNoForwardArgs(host, cmdStr string) []string {
+	return []string{
+		"-o", "ClearAllForwardings=yes",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
+		"--", host, shim.WrapRemoteShell(cmdStr),
+	}
+}
+
 func remoteExecNoForward(host string, args ...string) (string, error) {
 	cmdStr := strings.Join(args, " ")
-	cmd := exec.Command("ssh", "-o", "ClearAllForwardings=yes", "--", host, shim.WrapRemoteShell(cmdStr))
+	cmd := exec.Command("ssh", remoteNoForwardArgs(host, cmdStr)...)
 	hideConsoleWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
