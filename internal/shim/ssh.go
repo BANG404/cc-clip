@@ -692,7 +692,8 @@ const codexNotifyUnconfirmed = "a top-level notify line in ~/.codex/config.toml 
 	"remove it and re-run 'cc-clip connect <host> --codex'"
 
 // codexNotifyArgv reads the string elements of the line's single-line TOML
-// array. ok is false for anything else (a non-string element, an array that
+// array. ok is false for anything else (a non-string element, a missing
+// comma, text after the closing bracket other than a comment, an array that
 // continues on the next line, an escape it cannot decode).
 func codexNotifyArgv(line string) (argv []string, ok bool) {
 	eq := strings.Index(line, "=")
@@ -703,12 +704,8 @@ func codexNotifyArgv(line string) (argv []string, ok bool) {
 	if !strings.HasPrefix(rest, "[") {
 		return nil, false
 	}
-	rest = rest[1:]
-	for {
-		rest = strings.TrimLeft(rest, " \t,")
-		if strings.HasPrefix(rest, "]") {
-			return argv, true
-		}
+	rest = strings.TrimLeft(rest[1:], " \t")
+	for !strings.HasPrefix(rest, "]") {
 		m := tomlStringElement.FindStringSubmatchIndex(rest)
 		if m == nil {
 			return nil, false
@@ -724,8 +721,18 @@ func codexNotifyArgv(line string) (argv []string, ok bool) {
 			elem = elem[1 : len(elem)-1]
 		}
 		argv = append(argv, elem)
-		rest = rest[m[1]:]
+		// Elements are comma-separated; a trailing comma is valid TOML.
+		rest = strings.TrimLeft(rest[m[1]:], " \t")
+		if after, comma := strings.CutPrefix(rest, ","); comma {
+			rest = strings.TrimLeft(after, " \t")
+		} else if !strings.HasPrefix(rest, "]") {
+			return nil, false
+		}
 	}
+	if tail := strings.TrimSpace(rest[1:]); tail != "" && !strings.HasPrefix(tail, "#") {
+		return nil, false
+	}
+	return argv, true
 }
 
 // CodexNotifyPortMismatch is the shared connect and doctor wording for an

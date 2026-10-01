@@ -527,6 +527,9 @@ func TestCodexNotifyLineProblem(t *testing.T) {
 		{`notify = ["cc-clip", "plugin", "run", "claude-notify"]`, 18339, "cannot confirm"},
 		{`notify = ["sh", "-c", "cc-clip notify --from-codex"]`, 18339, "cannot confirm"},
 		{`notify = ["my-notifier"] # was cc-clip`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "notify", "--from-codex",]`, 18339, ""},
+		{`notify = ["cc-clip" "notify" "--from-codex"]`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "notify", "--from-codex"] trailing`, 18339, "cannot confirm"},
 	}
 	for _, tt := range tests {
 		problem := CodexNotifyLineProblem(tt.line, tt.port)
