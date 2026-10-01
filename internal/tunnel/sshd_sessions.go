@@ -95,7 +95,12 @@ func ParseSSHDSessions(out string) []SSHDSession {
 // the user's remote sshd sessions (one of them holds the forward) and how to
 // end the one whose client is gone without needing root. Every line starts
 // with indent.
-func StaleForwardGuidance(host string, port int, sessions []SSHDSession, indent string) []string {
+//
+// selfIndependent says the listing ran over a connection that cannot hold the
+// forward: its own master or a no-multiplex ssh, both with ClearAllForwardings.
+// Only then is the current session labelled "not the holder"; a reused
+// ControlMaster that owns the RemoteForward would be the holder itself.
+func StaleForwardGuidance(host string, port int, sessions []SSHDSession, selfIndependent bool, indent string) []string {
 	lines := []string{indent + fmt.Sprintf("One of your SSH sessions on %s holds port %d but no longer reaches this machine.", host, port)}
 	if len(sessions) == 0 {
 		lines = append(lines, indent+"Your sshd sessions on the remote could not be listed.")
@@ -103,8 +108,11 @@ func StaleForwardGuidance(host string, port int, sessions []SSHDSession, indent 
 		lines = append(lines, indent+"Your sshd sessions on the remote (one of them holds the port):")
 		for _, s := range sessions {
 			note := ""
-			if s.Current {
+			switch {
+			case s.Current && selfIndependent:
 				note = "  (this check; not the holder)"
+			case s.Current:
+				note = "  (this check)"
 			}
 			started := s.Started
 			if started == startUnknown {
@@ -116,7 +124,8 @@ func StaleForwardGuidance(host string, port int, sessions []SSHDSession, indent 
 	lines = append(lines,
 		indent+"Compare with the ssh clients still running on this machine:",
 		indent+"  ps -o pid,lstart,command -ax | grep '[s]sh'",
-		indent+"End the remote session that has no live client, then reconnect:",
+		indent+"A session with no client here is stale only if you do not also have it",
+		indent+"open from another computer. End that one, then reconnect:",
 		indent+fmt.Sprintf("  ssh -o ClearAllForwardings=yes %s 'kill <PID>'", host),
 		indent+"(ClearAllForwardings keeps that ssh from taking the port itself.)",
 	)

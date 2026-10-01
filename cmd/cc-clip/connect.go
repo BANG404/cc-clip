@@ -1017,9 +1017,30 @@ func describeCrossCompileSource(dir string) string {
 	if err != nil {
 		return formatCrossCompileSource(dir, "", false)
 	}
-	status, err := exec.Command("git", "-C", dir, "status", "--porcelain", "--untracked-files=no").Output()
-	modified := err == nil && len(strings.TrimSpace(string(status))) > 0
+	status, err := exec.Command("git", "-C", dir, "status", "--porcelain", "--untracked-files=all").Output()
+	modified := err == nil && buildTreeModified(string(status))
 	return formatCrossCompileSource(dir, strings.TrimSpace(string(commit)), modified)
+}
+
+// buildTreeModified reports whether `git status --porcelain` output shows a
+// change that reaches the built binary: any tracked change, or an untracked
+// file go build would pick up (*.go, go.mod, go.sum). Unrelated untracked
+// files such as notes stay out of the warning.
+func buildTreeModified(porcelain string) bool {
+	for _, line := range strings.Split(porcelain, "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		if !strings.HasPrefix(line, "??") {
+			return true
+		}
+		path := strings.Trim(strings.TrimSpace(line[3:]), `"`)
+		base := filepath.Base(path)
+		if strings.HasSuffix(path, ".go") || base == "go.mod" || base == "go.sum" {
+			return true
+		}
+	}
+	return false
 }
 
 func formatCrossCompileSource(dir, commit string, modified bool) string {

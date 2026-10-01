@@ -362,6 +362,26 @@ func TestClassifyNotifyPresenceChecks(t *testing.T) {
 // TestWithStaleForwardGuidance pins #173: a stale tunnel result names the
 // user's sshd sessions and an unprivileged way to end the holder, and stays a
 // failure.
+// TestRemoteNoForwardArgsNeverReuseAMaster pins the review of #176: doctor
+// must not ride an existing ControlMaster, which may own the RemoteForward and
+// would make doctor's own session the holder it labels "not the holder".
+func TestRemoteNoForwardArgsNeverReuseAMaster(t *testing.T) {
+	args := strings.Join(remoteNoForwardArgsFor("linux", "venus", "echo ok"), " ")
+	for _, want := range []string{"ClearAllForwardings=yes", "ControlMaster=no", "ControlPath=none", "-- venus"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("doctor ssh args lack %q: %s", want, args)
+		}
+	}
+
+	winArgs := strings.Join(remoteNoForwardArgsFor("windows", "venus", "echo ok"), " ")
+	if !strings.Contains(winArgs, "ClearAllForwardings=yes") || !strings.Contains(winArgs, "-- venus") {
+		t.Fatalf("windows doctor ssh args lack the forwarding guard: %s", winArgs)
+	}
+	if strings.Contains(winArgs, "Control") {
+		t.Fatalf("windows doctor ssh args must not carry multiplexing options: %s", winArgs)
+	}
+}
+
 func TestWithStaleForwardGuidance(t *testing.T) {
 	stale := CheckResult{"tunnel", false, "port 18339 accepts connections but no cc-clip daemon answered"}
 	out := "cc-clip-sshd-self:22\ncc-clip-sshd:11\tWed Sep 30 21:24:10 2026\tsshd: alice@notty\ncc-clip-sshd:22\tWed Sep 30 21:26:18 2026\tsshd: alice@notty\n"

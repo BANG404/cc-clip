@@ -512,6 +512,29 @@ func TestFormatCrossCompileSource(t *testing.T) {
 	}
 }
 
+// TestBuildTreeModified pins the review finding on #177: an untracked .go
+// file is compiled into the cross-built binary, so it must mark the tree as
+// modified, while unrelated untracked files must not.
+func TestBuildTreeModified(t *testing.T) {
+	tests := []struct {
+		name, porcelain string
+		want            bool
+	}{
+		{"clean", "", false},
+		{"tracked change", " M cmd/cc-clip/connect.go\n", true},
+		{"untracked go file", "?? cmd/cc-clip/extra.go\n", true},
+		{"untracked go.mod in a subdir", "?? tools/go.mod\n", true},
+		{"untracked notes only", "?? CONTEXT.md\n?? notes/todo.txt\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildTreeModified(tt.porcelain); got != tt.want {
+				t.Fatalf("buildTreeModified(%q) = %v, want %v", tt.porcelain, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDescribeCrossCompileSourceOutsideGit(t *testing.T) {
 	dir := t.TempDir()
 	if got := describeCrossCompileSource(dir); got != dir {
