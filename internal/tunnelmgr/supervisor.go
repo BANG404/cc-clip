@@ -342,6 +342,13 @@ func (s *Supervisor) loadOrInitialize() (*Record, error) {
 	return rec, nil
 }
 
+// localIdentityMismatchHint names the usual cause of a local identity
+// mismatch (#182): on the remote host, the port is the forward to the local
+// machine's daemon, so an instance that answers there is never this one.
+const localIdentityMismatchHint = "the daemon answering on this port is not this machine's cc-clip daemon. " +
+	"Run 'cc-clip tunnel run' on your local machine (the one running 'cc-clip serve'), not on the remote host, " +
+	"where this port is the forward to your local daemon"
+
 func (s *Supervisor) localReady() (bool, State, string) {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.Spec.Port)
 	if err := s.ProbeLocal(addr, 2*time.Second); err != nil {
@@ -359,7 +366,7 @@ func (s *Supervisor) localReady() (bool, State, string) {
 		return false, StateConfigError, err.Error()
 	}
 	if identity.InstanceID != s.Spec.ExpectedInstanceID {
-		return false, StateIdentityMismatch, "local daemon instance does not match persisted tunnel spec"
+		return false, StateIdentityMismatch, "local daemon instance does not match persisted tunnel spec; " + localIdentityMismatchHint
 	}
 	return true, StateHealthy, ""
 }

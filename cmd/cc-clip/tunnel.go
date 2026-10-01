@@ -73,7 +73,8 @@ func tunnelUsage(w io.Writer) {
 
 Subcommands:
   run <host>         Run the managed tunnel supervisor for <host> in the
-                     foreground (experimental, manual only).
+                     foreground (experimental, manual only). Run it on your
+                     local machine (where cc-clip serve runs), not on <host>.
 
 The supervisor starts a private non-interactive ssh master
 (BatchMode, ClearAllForwardings, ExitOnForwardFailure) that holds exactly
@@ -86,6 +87,10 @@ Host normally so HostName, User, IdentityFile and ProxyJump keep working.
 It does NOT enable anything automatically. Your existing interactive
 RemoteForward setup keeps working exactly as before; stop this command
 before relying on the managed forward (both bind the same remote port).
+Any ssh to <host> that takes the RemoteForward from your SSH config, including
+other tools' background connections, keeps the port first and leaves this
+command in port-conflict. To let it own the port while you try it, comment
+out that RemoteForward line for <host>, and restore it afterwards.
 
 Before first use with an existing host, deploy the identity helper:
   cc-clip connect <host> --force

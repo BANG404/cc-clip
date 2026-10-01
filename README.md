@@ -272,7 +272,8 @@ and what you should see when it works. Replace `myserver` with your host.
   that session closes, or its client disappears on a flaky network while the
   remote side keeps the port, paste stops working until you find and end it
   (see [Troubleshooting](docs/troubleshooting.md#stale-sshd-process-blocks-remoteforward)).
-- **How:** once per host, then leave it running in a terminal:
+- **How:** on your local machine (the one running `cc-clip serve`, not the
+  remote), deploy once per host, then leave it running in a terminal:
 
   ```bash
   cc-clip connect myserver --force   # deploys the helper the supervisor probes
@@ -280,9 +281,13 @@ and what you should see when it works. Replace `myserver` with your host.
   ```
 
 - **You'll see:** timestamped lines such as `managed tunnel state: healthy`, and
-  a new state line whenever it reconnects or waits. Your SSH config is not
-  changed, so an interactive `ssh myserver` still asks for the same port: if it
-  got there first, the supervisor reports `port-conflict` and waits for it.
+  a new state line whenever it reconnects or waits. Run on the remote by
+  mistake, it stops with `identity-mismatch` and says so. Your SSH config is
+  not changed, so every `ssh myserver` still asks for the same port, including
+  background connections other tools keep open. Whichever got there first holds
+  it, and the supervisor reports `port-conflict` and waits. To let the
+  supervisor own the port while you try it, comment out the `RemoteForward`
+  line under `Host myserver` in `~/.ssh/config`, and restore it afterwards.
   Hosts set up with `--use-remote-bin` are not supported yet, and while the
   supervisor runs it keeps the token from expiring.
 
@@ -386,7 +391,7 @@ Every `cc-clip` command, grouped by the machine you run it on. The
 | `cc-clip hosts forget HOST` | Removes a host from that list. The remote is not touched. |
 | `cc-clip uninstall --host HOST` | Removes the managed Claude hooks and the PATH marker from a host. Run `cc-clip uninstall` on the host first; see [Remove cc-clip](#remove-cc-clip-from-a-host). |
 | `cc-clip uninstall --codex --host HOST` | Removes Codex support from a host: stops the bridge and Xvfb, strips the Codex `notify` entry and the display setting. |
-| `cc-clip tunnel run HOST` | **Experimental.** Keeps the host's paste tunnel up from a private SSH connection and reconnects it, instead of relying on whichever `ssh` session got the port first. Foreground until Ctrl-C; run `connect HOST --force` once first. `--reset` clears a tripped crash-loop breaker. See [Keep the tunnel up on its own](#keep-the-tunnel-up-on-its-own-experimental). |
+| `cc-clip tunnel run HOST` | **Experimental.** Keeps the host's paste tunnel up from a private SSH connection and reconnects it, instead of relying on whichever `ssh` session got the port first. Run it here, not on the remote. Foreground until Ctrl-C; run `connect HOST --force` once first. `--reset` clears a tripped crash-loop breaker. See [Keep the tunnel up on its own](#keep-the-tunnel-up-on-its-own-experimental). |
 
 **On your local machine: the daemon and your own install**
 

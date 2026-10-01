@@ -139,9 +139,10 @@ Deployment targets (connect/setup; choose at most one selector):
 
 Managed tunnel (experimental, manual only):
   tunnel run <host>  Run the managed tunnel supervisor for <host> in the
-                     foreground. Starts a private non-interactive ssh master
-                     holding one reverse forward, probes daemon health through
-                     it, reconnects with backoff; stops cleanly on Ctrl-C.
+                     foreground, on your local machine (not on <host>).
+                     Starts a private non-interactive ssh master holding one
+                     reverse forward, probes daemon health through it,
+                     reconnects with backoff; stops cleanly on Ctrl-C.
                      No LaunchAgent, no ~/.ssh/config changes, nothing enabled
                      automatically. The legacy RemoteForward workflow is
                      unchanged and remains the default.
