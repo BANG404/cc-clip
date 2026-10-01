@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md @ ece56f51cdfa23c37c4f7eccad92c97f16fb306d -->
+<!-- i18n-source: README.md @ cb54b21c535ed03bd3d0a62a3b48a966637d2d9f -->
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -254,7 +254,8 @@ Windows 支持仍处于实验阶段。请先使用 [Windows 快速开始](docs/w
 - **为什么：**平时是哪个 `ssh myserver` 先连上，隧道就归哪个会话。那个会话一关闭，或者在
   不稳定的网络上客户端消失而远程仍占着端口，粘贴就会失效，直到你找出并结束那个会话
   （参见[故障排查指南](docs/troubleshooting.md#stale-sshd-process-blocks-remoteforward)）。
-- **怎么用：**每台主机先部署一次，然后让它在一个终端里持续运行：
+- **怎么用：**在你的本地机器上（运行 `cc-clip serve` 的那台，不是远程主机），每台主机先部署
+  一次，然后让它在一个终端里持续运行：
 
   ```bash
   cc-clip connect myserver --force   # 部署 supervisor 要探测的辅助程序
@@ -262,9 +263,12 @@ Windows 支持仍处于实验阶段。请先使用 [Windows 快速开始](docs/w
   ```
 
 - **你会看到：**带时间戳的日志，例如 `managed tunnel state: healthy`，每次重连或等待时都会
-  打印新的状态行。它不会修改你的 SSH 配置，所以交互式的 `ssh myserver` 仍会申请同一个端口：
-  如果它先拿到端口，supervisor 会报告 `port-conflict` 并等待。用 `--use-remote-bin` 设置的
-  主机暂不支持；supervisor 运行期间，token 会一直保持有效。
+  打印新的状态行。如果误在远程主机上运行，它会以 `identity-mismatch` 停止并说明原因。它不会
+  修改你的 SSH 配置，所以每个 `ssh myserver` 仍会申请同一个端口，包括其他工具保持的后台连接。
+  谁先拿到端口就由谁持有，supervisor 会报告 `port-conflict` 并等待。若想在试用期间让
+  supervisor 独占端口，请在 `~/.ssh/config` 的 `Host myserver` 下注释掉 `RemoteForward` 那一行，
+  试用结束后再恢复。用 `--use-remote-bin` 设置的主机暂不支持；supervisor 运行期间，token 会
+  一直保持有效。
 
 ### 从主机上移除 cc-clip
 
@@ -363,7 +367,7 @@ Notifications
 | `cc-clip hosts forget HOST` | 从上述列表中移除一台主机，不会动远程。 |
 | `cc-clip uninstall --host HOST` | 从主机上移除托管的 Claude hook 和 PATH 标记。请先在该主机上运行 `cc-clip uninstall`；参见[从主机上移除 cc-clip](#从主机上移除-cc-clip)。 |
 | `cc-clip uninstall --codex --host HOST` | 从主机上移除 Codex 支持：停止桥接器和 Xvfb，删除 Codex 的 `notify` 配置和显示设置。 |
-| `cc-clip tunnel run HOST` | **实验性。**由一条私有 SSH 连接持有并维护主机的粘贴隧道，断开后自动重连，而不是依赖先拿到端口的那个 `ssh` 会话。前台运行直到 Ctrl-C；需要先运行一次 `connect HOST --force`。`--reset` 清除已触发的崩溃循环保护。参见[让隧道自行保持连接](#让隧道自行保持连接-实验性)。 |
+| `cc-clip tunnel run HOST` | **实验性。**由一条私有 SSH 连接持有并维护主机的粘贴隧道，断开后自动重连，而不是依赖先拿到端口的那个 `ssh` 会话。请在本机运行，不要在远程主机上运行。前台运行直到 Ctrl-C；需要先运行一次 `connect HOST --force`。`--reset` 清除已触发的崩溃循环保护。参见[让隧道自行保持连接](#让隧道自行保持连接-实验性)。 |
 
 **在本地机器上：守护进程和本机安装**
 
