@@ -323,6 +323,8 @@ func TestClassifyCodexNotifyCheck(t *testing.T) {
 		{"unmanaged cc-clip line on this port works", `codex-notify:unmanaged-cc-clip:notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify"]`, nil, true, "functional"},
 		{"unmanaged cc-clip line on another port fails", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "notify", "--port", "18341"]`, nil, false, "targets port 18341, not 18340"},
 		{"default-port line against a non-default port fails", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "plugin", "run", "codex-notify"]` + "\n", nil, false, "targets port 18339, not 18340"},
+		{"line naming cc-clip as an argument is foreign", `codex-notify:unmanaged-cc-clip:notify = ["logger", "cc-clip"]`, nil, true, "non-cc-clip"},
+		{"invalid --port line fails", `codex-notify:unmanaged-cc-clip:notify = ["cc-clip", "notify", "--port", "nope"]`, nil, false, "invalid --port"},
 		{"foreign notify named but respected", "codex-notify:foreign", nil, true, "non-cc-clip"},
 		{"codex present but unwired", "codex-notify:none", nil, false, "--codex"},
 		{"unrecognized output fails closed", "garbage", nil, false, "did not complete"},

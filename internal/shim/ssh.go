@@ -541,8 +541,9 @@ stripped=$(sed '/^%[1]s$/,/^%[2]s$/d' "$config" | sed '/./,$!d')
 # misclassifying indented sub-tables.
 #
 # awk exits 1 for no top-level notify, 0 for a foreign one, and 2 when the
-# line already invokes cc-clip (the same 'cc-clip' substring doctor's probe
-# matches); in that case it prints the line so Go can check its port.
+# line mentions cc-clip (the same 'cc-clip' substring doctor's probe
+# matches); in that case it prints the line so Go can check that it runs
+# cc-clip and on which port.
 rc=0
 line=$(printf '%%s\n' "$stripped" | awk '
   /^[[:space:]]*\[/ { in_section = 1; next }
@@ -551,7 +552,7 @@ line=$(printf '%%s\n' "$stripped" | awk '
 ') || rc=$?
 if [ "$rc" = 2 ]; then
   # A hand-added or older cc-clip line: never touch it. Go decides whether
-  # its port matches (CodexNotifyLinePort).
+  # it runs cc-clip on this port (CodexNotifyLineVerdict).
   printf '%%s%%s\n' '%[4]s' "$line"
   exit 0
 fi
@@ -614,42 +615,101 @@ func codexNotifyInjectResult(out string, err error, port int) error {
 		return nil
 	}
 	line := strings.SplitN(out[i+len(codexNotifyUnmanagedMarker):], "\n", 2)[0]
-	if linePort := CodexNotifyLinePort(line); linePort != port {
-		return errors.New(CodexNotifyPortMismatch(linePort, port))
+	invokes, problem := CodexNotifyLineVerdict(line, port)
+	if !invokes {
+		return errors.New("failed to inject notify config into ~/.codex/config.toml: " + codexNotifyForeignRefusal)
+	}
+	if problem != "" {
+		return errors.New(problem)
 	}
 	return &UnmanagedNotifyError{Note: "an unmanaged cc-clip notify line is already configured in ~/.codex/config.toml " +
 		"(functional; remove it and re-run 'cc-clip connect <host> --codex' to adopt the managed block)"}
 }
 
-// CodexNotifyLinePort returns the daemon port an unmanaged cc-clip notify
-// line posts to. It reads the same forms cc-clip itself honours: a
-// CC_CLIP_PORT=N element (the managed block's form), overridden by a --port N
-// or --port=N flag, as getPort does at runtime. Elements are TOML strings,
-// and an element such as "cc-clip notify --port 18340" passed to a shell is
-// split into words too. Without either, the line uses defaultDaemonPort.
-func CodexNotifyLinePort(line string) int {
+// codexNotifyForeignRefusal is connect's refusal for a top-level notify line
+// that mentions cc-clip without running it, matching the injection script's
+// refusal for any other foreign notify.
+const codexNotifyForeignRefusal = "existing top-level notify setting does not run cc-clip -- refusing to inject duplicate. " +
+	"Remove or comment out the top-level notify line first ([agents.X].notify is fine)"
+
+// CodexNotifyLineVerdict judges an unmanaged top-level notify line that
+// mentions cc-clip, for connect and doctor alike. invokes is false when
+// cc-clip is not the command the line runs, only an argument such as
+// ["logger", "cc-clip"]; such a line is a foreign notify. Otherwise problem is
+// empty when the line posts to port, and says why it does not.
+func CodexNotifyLineVerdict(line string, port int) (invokes bool, problem string) {
+	words := codexNotifyWords(line)
+	if !invokesCCClip(words) {
+		return false, ""
+	}
+	linePort, badFlag := codexNotifyLinePort(words)
+	switch {
+	case badFlag != "":
+		return true, fmt.Sprintf("an unmanaged cc-clip notify line in ~/.codex/config.toml passes an invalid --port %q, "+
+			"so cc-clip exits without sending; remove it and re-run 'cc-clip connect <host> --codex'", badFlag)
+	case linePort != port:
+		return true, CodexNotifyPortMismatch(linePort, port)
+	default:
+		return true, ""
+	}
+}
+
+// codexNotifyWords splits the line's TOML string elements into words; an
+// element such as "cc-clip notify --port 18340" passed to a shell is split
+// too.
+func codexNotifyWords(line string) []string {
 	var words []string
 	for _, m := range tomlStringElement.FindAllStringSubmatch(line, -1) {
 		words = append(words, strings.Fields(m[1]+m[2])...)
 	}
+	return words
+}
+
+// invokesCCClip reports whether a cc-clip binary, bare or by path, is followed
+// by one of the subcommands a notify line runs.
+func invokesCCClip(words []string) bool {
+	for i := 0; i+1 < len(words); i++ {
+		bin := strings.Trim(words[i], `"'`)
+		if bin != "cc-clip" && !strings.HasSuffix(bin, "/cc-clip") {
+			continue
+		}
+		if sub := strings.Trim(words[i+1], `"';`); sub == "notify" || sub == "plugin" {
+			return true
+		}
+	}
+	return false
+}
+
+// codexNotifyLinePort returns the daemon port the line posts to, as getPort
+// resolves it at runtime: a --port N or --port=N flag over a CC_CLIP_PORT=N
+// element (the managed block's form), else defaultDaemonPort. An invalid
+// CC_CLIP_PORT is ignored, as getPort ignores it; an invalid --port is
+// returned as badFlag, since cc-clip notify exits on it.
+func codexNotifyLinePort(words []string) (port int, badFlag string) {
 	env, flag := 0, 0
 	for i, w := range words {
+		value, isFlag := "", false
 		switch {
 		case strings.HasPrefix(w, "CC_CLIP_PORT="):
 			env = parsePort(strings.TrimPrefix(w, "CC_CLIP_PORT="), env)
 		case strings.HasPrefix(w, "--port="):
-			flag = parsePort(strings.TrimPrefix(w, "--port="), flag)
+			value, isFlag = strings.TrimPrefix(w, "--port="), true
 		case w == "--port" && i+1 < len(words):
-			flag = parsePort(words[i+1], flag)
+			value, isFlag = words[i+1], true
+		}
+		if isFlag {
+			if flag = parsePort(value, 0); flag == 0 {
+				return 0, value
+			}
 		}
 	}
 	switch {
 	case flag != 0:
-		return flag
+		return flag, ""
 	case env != 0:
-		return env
+		return env, ""
 	default:
-		return defaultDaemonPort
+		return defaultDaemonPort, ""
 	}
 }
 

@@ -48,7 +48,7 @@ fi`, shim.ClaudeManagedHookCommand(port), shim.ClaudeLegacyManagedHookCommand, s
 
 // codexNotifyProbeCommand classifies the notify wiring in ~/.codex/config.toml.
 // For an unmanaged cc-clip line it prints the line after the marker so
-// classifyCodexNotifyCheck can check its port with shim.CodexNotifyLinePort,
+// classifyCodexNotifyCheck can judge it with shim.CodexNotifyLineVerdict,
 // the rule connect uses.
 var codexNotifyProbeCommand = fmt.Sprintf(`f="$HOME/.codex/config.toml"
 if [ ! -f "$f" ]; then
@@ -91,6 +91,8 @@ func classifyClaudeHooksCheck(out string, err error) CheckResult {
 
 const codexUnmanagedProbeMarker = "codex-notify:unmanaged-cc-clip:"
 
+var codexForeignNotifyResult = CheckResult{"codex-notify", true, "a non-cc-clip notify setting is configured; cc-clip respects it and will refuse to inject over it"}
+
 func classifyCodexNotifyCheck(out string, err error, port int) CheckResult {
 	if err != nil {
 		return CheckResult{"codex-notify", false, fmt.Sprintf("remote check could not run over SSH: %v (%s)", err, strings.TrimSpace(out))}
@@ -103,12 +105,16 @@ func classifyCodexNotifyCheck(out string, err error, port int) CheckResult {
 	case strings.Contains(out, codexUnmanagedProbeMarker):
 		line := out[strings.Index(out, codexUnmanagedProbeMarker)+len(codexUnmanagedProbeMarker):]
 		line = strings.SplitN(line, "\n", 2)[0]
-		if linePort := shim.CodexNotifyLinePort(line); linePort != port {
-			return CheckResult{"codex-notify", false, shim.CodexNotifyPortMismatch(linePort, port)}
+		invokes, problem := shim.CodexNotifyLineVerdict(line, port)
+		switch {
+		case !invokes:
+			return codexForeignNotifyResult
+		case problem != "":
+			return CheckResult{"codex-notify", false, problem}
 		}
 		return CheckResult{"codex-notify", true, "an unmanaged cc-clip notify line is configured (functional; remove it and re-run 'cc-clip connect <host> --codex' to adopt the managed block)"}
 	case strings.Contains(out, "codex-notify:foreign"):
-		return CheckResult{"codex-notify", true, "a non-cc-clip notify setting is configured; cc-clip respects it and will refuse to inject over it"}
+		return codexForeignNotifyResult
 	case strings.Contains(out, "codex-notify:none"):
 		return CheckResult{"codex-notify", false, "Codex is set up but notifications are not wired; run 'cc-clip connect <host> --codex'"}
 	default:
