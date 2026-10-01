@@ -500,36 +500,33 @@ func TestEnsureRemoteCodexNotifyConfigLeavesUnmanagedCCClipLine(t *testing.T) {
 	}
 }
 
-func TestCodexNotifyLineVerdict(t *testing.T) {
+func TestCodexNotifyLineProblem(t *testing.T) {
 	tests := []struct {
 		line        string
 		port        int
-		wantInvokes bool
 		wantProblem string
 	}{
-		{`notify = ["cc-clip", "notify", "--from-codex"]`, 18339, true, ""},
-		{`notify = ["cc-clip", "plugin", "run", "codex-notify"]`, 18339, true, ""},
-		{`notify = ["/home/u/.local/bin/cc-clip", "notify"]`, 18339, true, ""},
-		{`notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "plugin", "run", "codex-notify"]`, 18340, true, ""},
-		{`notify = ["cc-clip", "notify", "--port", "18340"]`, 18340, true, ""},
-		{`notify = ["cc-clip", "notify", "--port=18340"]`, 18340, true, ""},
-		{`notify = ['cc-clip', 'notify', '--port=18341']`, 18341, true, ""},
-		{`notify = ["sh", "-c", "cc-clip notify --port 18342 --from-codex"]`, 18342, true, ""},
-		{`notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify", "--port", "18343"]`, 18343, true, ""},
-		{`notify = ["env", "CC_CLIP_PORT=nope", "cc-clip", "notify"]`, 18339, true, ""},
-		{`notify = ["cc-clip", "notify"]`, 18340, true, "targets port 18339, not 18340"},
-		{`notify = ["cc-clip", "notify", "--port", "nope"]`, 18339, true, `invalid --port "nope"`},
-		{`notify = ["cc-clip", "notify", "--port=70000"]`, 18339, true, `invalid --port "70000"`},
-		{`notify = ["logger", "cc-clip"]`, 18339, false, ""},
-		{`notify = ["my-notifier"] # was cc-clip`, 18339, false, ""},
+		{`notify = ["cc-clip", "notify", "--from-codex"]`, 18339, ""},
+		{`notify = ["cc-clip", "plugin", "run", "codex-notify"]`, 18339, ""},
+		{`"notify" = ["/home/u/.local/bin/cc-clip", "notify"] # managed by hand`, 18339, ""},
+		{`notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "plugin", "run", "codex-notify"]`, 18340, ""},
+		{`notify = ["cc-clip", "notify", "--port", "18340"]`, 18340, ""},
+		{`notify = ['cc-clip', 'notify', '--port=18341']`, 18341, ""},
+		{`notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify", "--port", "18343"]`, 18343, ""},
+		{`notify = ["env", "CC_CLIP_PORT=nope", "cc-clip", "notify"]`, 18339, ""},
+		{`notify = ["env", "CC_CLIP_PORT=70000", "cc-clip", "notify"]`, 18339, "targets port 70000, not 18339"},
+		{`notify = ["cc-clip", "notify"]`, 18340, "targets port 18339, not 18340"},
+		{`notify = ["cc-clip", "notify", "--port", "nope"]`, 18339, `invalid --port "nope"`},
+		{`notify = ["logger", "cc-clip"]`, 18339, "cannot confirm"},
+		{`notify = ["logger", "cc-clip", "notify"]`, 18339, "cannot confirm"},
+		{`notify = ["cc-clip", "plugin", "run", "claude-notify"]`, 18339, "cannot confirm"},
+		{`notify = ["sh", "-c", "cc-clip notify --from-codex"]`, 18339, "cannot confirm"},
+		{`notify = ["my-notifier"] # was cc-clip`, 18339, "cannot confirm"},
 	}
 	for _, tt := range tests {
-		invokes, problem := CodexNotifyLineVerdict(tt.line, tt.port)
-		if invokes != tt.wantInvokes {
-			t.Errorf("CodexNotifyLineVerdict(%s) invokes = %v, want %v", tt.line, invokes, tt.wantInvokes)
-		}
+		problem := CodexNotifyLineProblem(tt.line, tt.port)
 		if (tt.wantProblem == "") != (problem == "") || !strings.Contains(problem, tt.wantProblem) {
-			t.Errorf("CodexNotifyLineVerdict(%s, %d) problem = %q, want %q", tt.line, tt.port, problem, tt.wantProblem)
+			t.Errorf("CodexNotifyLineProblem(%s, %d) = %q, want %q", tt.line, tt.port, problem, tt.wantProblem)
 		}
 	}
 }
@@ -552,7 +549,7 @@ func TestCodexNotifyInjectResult(t *testing.T) {
 		{name: "--port=18340 line, port 18340", out: codexNotifyUnmanagedMarker + `notify = ["cc-clip", "notify", "--port=18340"]`, port: 18340, wantWired: true},
 		{name: "CC_CLIP_PORT=18340 line, port 18340", out: codexNotifyUnmanagedMarker + `notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify"]`, port: 18340, wantWired: true},
 		{name: "CC_CLIP_PORT=18340 line, default port", out: codexNotifyUnmanagedMarker + `notify = ["env", "CC_CLIP_PORT=18340", "cc-clip", "notify"]`, port: 18339, wantContain: "targets port 18340, not 18339"},
-		{name: "line naming cc-clip as an argument refused", out: codexNotifyUnmanagedMarker + `notify = ["logger", "cc-clip"]`, port: 18339, wantContain: "refusing to inject duplicate"},
+		{name: "line naming cc-clip as an argument fails", out: codexNotifyUnmanagedMarker + `notify = ["logger", "cc-clip", "notify"]`, port: 18339, wantContain: "cannot confirm"},
 		{name: "invalid --port line fails", out: codexNotifyUnmanagedMarker + `notify = ["cc-clip", "notify", "--port", "nope"]`, port: 18339, wantContain: "invalid --port"},
 		{name: "foreign notify refused", out: refusal, err: errors.New("exit status 7"), port: 18339, wantContain: "refusing to inject duplicate"},
 		{name: "script failure without reason", err: errors.New("exit status 1"), port: 18339, wantContain: "exit status 1"},
