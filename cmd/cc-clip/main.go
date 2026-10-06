@@ -43,6 +43,10 @@ func main() {
 		cmdSend()
 	case "remote":
 		cmdRemote()
+	case "windows-bridge":
+		cmdWindowsBridge()
+	case "bridge":
+		cmdBridge()
 	case "hotkey":
 		cmdHotkey()
 	case "install":
@@ -182,6 +186,11 @@ Local daemon and diagnostics (run on your local machine):
   help               Show this help
 
 Windows (run on your local Windows machine; experimental):
+  bridge <host> -- <agent.exe> [args...]
+                     Launch a native Windows remote agent with image clipboard
+    --check          Verify remote PNG and DIBV5 reads without launching an agent
+    --remote-port    Override the automatically selected remote tunnel port
+    --no-tty         Run a noninteractive diagnostic command
   send [<host>] [<file>]
                      Upload the clipboard image or a file to the host and print
                      its remote path

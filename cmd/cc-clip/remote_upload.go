@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -66,6 +68,40 @@ func runRemote(args []string, in io.Reader, out io.Writer) error {
 			return err
 		}
 		return json.NewEncoder(out).Encode(result)
+	case "bridge-token":
+		fs := flag.NewFlagSet("remote bridge-token", flag.ContinueOnError)
+		id := fs.String("id", "", "private bridge session identifier")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		idBytes, err := hex.DecodeString(*id)
+		if err != nil || len(idBytes) != 16 || len(fs.Args()) != 0 {
+			return fmt.Errorf("invalid bridge session identifier")
+		}
+		data, err := io.ReadAll(io.LimitReader(in, 65))
+		if err != nil {
+			return err
+		}
+		tokenBytes, err := hex.DecodeString(string(data))
+		if err != nil || len(tokenBytes) != 32 {
+			return fmt.Errorf("invalid bridge token")
+		}
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return err
+		}
+		path, err := remoteupload.WriteSecret(filepath.Join(cache, "cc-clip", "bridge", *id), "token", data)
+		if err != nil {
+			return err
+		}
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			os.Remove(path)
+			return err
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		listener.Close()
+		return json.NewEncoder(out).Encode(map[string]any{"path": path, "port": port})
 	default:
 		return fmt.Errorf("unknown remote command: %s", args[0])
 	}

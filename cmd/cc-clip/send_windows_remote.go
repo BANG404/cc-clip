@@ -44,7 +44,11 @@ func rawUploadSSHArgs(host, command string) []string {
 }
 
 func runUploadSSH(host, command string, in io.Reader) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	return runUploadSSHTimeout(host, command, in, 2*time.Minute)
+}
+
+func runUploadSSHTimeout(host, command string, in io.Reader, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ssh", rawUploadSSHArgs(host, command)...)
 	hideConsoleWindow(cmd)
@@ -116,6 +120,10 @@ func ensureWindowsUploadHelper(host string, p uploadProbe) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return ensureWindowsUploadHelperBinary(host, p, local)
+}
+
+func ensureWindowsUploadHelperBinary(host string, p uploadProbe, local string) (string, error) {
 	f, err := os.Open(local)
 	if err != nil {
 		return "", err
