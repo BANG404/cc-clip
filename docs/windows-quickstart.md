@@ -147,7 +147,52 @@ Without it the image is put back 150 ms after the keystroke, so a manual
 and a reboot. The same flag has always been available on
 `cc-clip send --paste`.
 
-## Experimental: Direct Remote Clipboard
+## Native Windows remote hosts (fork development build)
+
+This fork also supports the hotkey/send workflow when the SSH server and the
+coding agent run natively on Windows. It does not require Git Bash, WSL, Xvfb,
+or a desktop login on the remote. This support is not in upstream v0.13.1.
+The local and remote Windows machines must use the same architecture (amd64
+or arm64) for this first implementation.
+
+Build the development binary, then use it on your local Windows machine:
+
+```powershell
+go build -o .\dist\cc-clip-dev.exe .\cmd\cc-clip
+.\dist\cc-clip-dev.exe send myserver .\screenshot.png
+.\dist\cc-clip-dev.exe hotkey myserver
+```
+
+The first send probes the remote with Windows PowerShell, then deploys a
+matching helper with SFTP. Images travel as raw bytes over SSH stdin; length
+and SHA256 are checked before the final file is saved and before any path is
+pasted. The helper is stored by binary hash under
+`%LOCALAPPDATA%\cc-clip\bin`, and reused on later sends. Existing installed
+`cc-clip.exe` files are left in place. PowerShell and SFTP must be available;
+changing the SSH server's default shell is unnecessary.
+
+Images are saved in `%LOCALAPPDATA%\cc-clip\uploads`. The receiver restricts
+that directory and inherited file permissions to the SSH account and SYSTEM.
+The default image limit is 20 MiB. Failed or incomplete transfers are removed.
+Saved images are retained until you remove them. A Windows `--remote-dir` may
+select a subdirectory of the managed uploads directory (relative paths are
+resolved within that directory); paths outside that tree
+are rejected to avoid changing permissions on an unrelated directory.
+
+Press `Alt+Shift+V` with an image copied locally and the remote agent terminal
+focused. The hotkey uploads the image and pastes its native Windows path.
+Paths containing spaces are quoted. If synthetic paste does not work in your
+terminal, use `hotkey myserver --no-restore` to keep the path on the clipboard
+and paste it manually. This attaches images by file path; native remote
+clipboard reads and Windows remote `setup`/`connect`/`doctor --host` integration
+are not implemented by this change.
+
+To start the development hotkey automatically at login, put its executable in
+a stable location and run `cc-clip-dev.exe hotkey myserver --enable-autostart`.
+Stop it with `cc-clip-dev.exe hotkey --disable-autostart`. For manual use, stop
+it with `cc-clip-dev.exe hotkey --stop`.
+
+## Experimental: Direct Remote Clipboard on Linux
 
 This section is for source builds and future explicit prereleases only. It is
 not part of the latest stable release.

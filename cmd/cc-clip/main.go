@@ -41,6 +41,8 @@ func main() {
 		cmdPaste()
 	case "send":
 		cmdSend()
+	case "remote":
+		cmdRemote()
 	case "hotkey":
 		cmdHotkey()
 	case "install":
@@ -184,7 +186,8 @@ Windows (run on your local Windows machine; experimental):
                      Upload the clipboard image or a file to the host and print
                      its remote path
     --file           Upload this image file instead of reading the clipboard
-    --remote-dir     Remote directory (default: ~/.cache/cc-clip/uploads)
+    --remote-dir     Remote directory (Linux: ~/.cache/cc-clip/uploads;
+                     Windows: %LOCALAPPDATA%\cc-clip\uploads)
     --paste          Paste the remote path into the active window
     --delay-ms       Delay before Ctrl+Shift+V when --paste is used (default: 150)
     --no-restore     Do not restore the original image clipboard after --paste
